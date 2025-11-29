@@ -205,7 +205,7 @@ export const SIMULATION_CONFIG = {
   mutationRate: 0.8,       // 80% of offspring mutate (was 10%)
   mutationAmount: 4,       // Up to 4 genes mutate at once
   initialPopulation: 100,  // More starting creatures for diversity
-  foodSpawnRate: 2.0,      // Much higher plant spawn rate
+  foodSpawnRate: 5.0,      // Very high plant spawn rate to keep up with creatures
   maxCreatures: 2000,
-  maxPlants: 5000          // More plants allowed
+  maxPlants: 8000          // More plants allowed
 };

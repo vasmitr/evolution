@@ -175,14 +175,18 @@ class PlantRenderer {
     this.age = 0;
 
     const geometry = new THREE.TetrahedronGeometry(0.5);
+    // Water plants are brighter/bioluminescent, land plants are normal green
+    const isWater = !data.isOnLand;
     const material = new THREE.MeshStandardMaterial({
-      color: 0x00ff00,
-      emissive: 0x004400
+      color: isWater ? 0x00ffaa : 0x00ff00,  // Cyan-green for water, pure green for land
+      emissive: isWater ? 0x00aa66 : 0x004400,  // Brighter glow underwater
+      emissiveIntensity: isWater ? 0.5 : 0.2
     });
 
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.position.set(data.position.x, data.position.y, data.position.z);
     this.mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+    this.isWater = isWater;
   }
 
   updateFromData(data, dt) {
@@ -197,9 +201,13 @@ class PlantRenderer {
     const pulse = 1 + Math.sin(this.age * 2) * 0.1;
     this.mesh.scale.setScalar(energyScale * pulse);
 
-    // Color intensity based on energy
+    // Color intensity based on energy - water plants glow more
     const intensity = 0.3 + (data.energy / 80) * 0.7;
-    this.mesh.material.emissive.setRGB(0, intensity * 0.3, 0);
+    if (this.isWater) {
+      this.mesh.material.emissive.setRGB(0, intensity * 0.5, intensity * 0.3);
+    } else {
+      this.mesh.material.emissive.setRGB(0, intensity * 0.3, 0);
+    }
   }
 
   dispose() {

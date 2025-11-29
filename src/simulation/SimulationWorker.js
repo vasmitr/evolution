@@ -644,10 +644,10 @@ class WorkerPlant {
   constructor(position, id, isOnLand = false) {
     this.id = id;
     this.position = { x: position?.x || 0, y: position?.y || 0, z: position?.z || 0 };
-    this.energy = 10;  // Start with minimal energy, will grow via photosynthesis
+    this.energy = 20;  // Start with more energy
     this.maxEnergy = 50 + Math.random() * 30;  // Max energy capacity
     this.age = 0;
-    this.maxAge = 40 + Math.random() * 40;  // 40-80 seconds lifespan
+    this.maxAge = 80 + Math.random() * 80;  // 80-160 seconds lifespan (longer lived)
     this.dead = false;
     this.isOnLand = isOnLand;
     this.mature = false;  // Plants need to mature before reproducing
@@ -657,8 +657,8 @@ class WorkerPlant {
   update(dt, biome) {
     this.age += dt;
 
-    // Maturity at 25% of lifespan
-    if (!this.mature && this.age > this.maxAge * 0.25) {
+    // Maturity at 20% of lifespan
+    if (!this.mature && this.age > this.maxAge * 0.2) {
       this.mature = true;
     }
 
@@ -674,24 +674,23 @@ class WorkerPlant {
     }
 
     // Photosynthesis - plants gain energy from sun/thermal sources
-    // Land plants get more sun, water plants get thermal energy from vents
+    // Water plants (isOnLand=false) use chemosynthesis from thermal vents
+    // Land plants use photosynthesis
     let energyGain = 0;
 
-    if (this.isOnLand || this.position.y > -2) {
-      // Surface/land plants - photosynthesis from sunlight
-      energyGain = 1.5 * dt;  // Good sunlight
-    } else if (this.position.y > -10) {
-      // Shallow water - some light penetration
-      energyGain = 1.0 * dt;
+    if (this.isOnLand) {
+      // Land plants - photosynthesis from sunlight
+      energyGain = 1.5 * dt;
     } else {
-      // Deep water - thermal vent energy (less efficient)
-      energyGain = 0.5 * dt;
+      // Water plants - chemosynthesis from thermal vents and nutrients
+      // All water plants get decent energy regardless of depth
+      energyGain = 1.2 * dt;  // Good energy from chemosynthesis
     }
 
     // Temperature affects growth rate
     if (biome) {
       if (biome.temp < 0) {
-        energyGain *= 0.3;  // Cold slows growth
+        energyGain *= 0.5;  // Cold slows growth
       } else if (biome.temp > 30) {
         energyGain *= 1.2;  // Warm speeds growth
       }
@@ -700,8 +699,8 @@ class WorkerPlant {
     this.energy = Math.min(this.maxEnergy, this.energy + energyGain);
 
     // Reproduction - mature plants with enough energy can spawn offspring
-    if (this.mature && this.energy > this.maxEnergy * 0.7 && this.reproductionCooldown <= 0) {
-      this.reproductionCooldown = 10 + Math.random() * 10;  // 10-20 second cooldown
+    if (this.mature && this.energy > this.maxEnergy * 0.6 && this.reproductionCooldown <= 0) {
+      this.reproductionCooldown = 8 + Math.random() * 8;  // 8-16 second cooldown (faster reproduction)
       return this.reproduce();
     }
 
@@ -1442,13 +1441,13 @@ function update(dt) {
     if (isOnLand) {
       y = terrainH + 0.5;
     } else {
-      // Water plants stay in the lower portion where creatures swim
+      // Water plants float throughout the water column where creatures swim
       const waterDepth = Math.abs(terrainH);
-      y = terrainH + 0.5 + Math.random() * Math.min(waterDepth * 0.4, 5);
+      y = terrainH + 1 + Math.random() * Math.max(waterDepth * 0.6, 10);
     }
 
     const newPlant = new WorkerPlant({ x: seedX, y, z: seedZ }, nextPlantId++, isOnLand);
-    newPlant.energy = 15;  // Seeds start with some energy
+    newPlant.energy = 20;  // Seeds start with decent energy
     plants.push(newPlant);
     newPlants.push(newPlant.toData());
   }
@@ -1488,34 +1487,88 @@ function update(dt) {
     }
   }
 
-  // Random spawn plants - biased toward water where creatures need food
-  const plantSpawnChance = SIMULATION_CONFIG.foodSpawnRate * 0.5 * (1 - plants.length / SIMULATION_CONFIG.maxPlants);
+  // Density-based plant spawning - spawn in areas where plants have been eaten
+  // Use a coarse grid to find low-density regions
+  const DENSITY_CELL_SIZE = 100;  // Check plant density in 100x100 cells
+  const waterZCells = 4;  // -100 to -500 = 400 units = 4 cells
+  const xCells = Math.ceil(WORLD_SIZE.width / DENSITY_CELL_SIZE);
 
-  if (Math.random() < plantSpawnChance && plants.length < SIMULATION_CONFIG.maxPlants) {
-    const x = (Math.random() - 0.5) * WORLD_SIZE.width * 0.95;  // Stay within bounds
+  // Count plants per cell (water zone only - that's where the problem is)
+  const plantDensity = {};
+  for (const p of plants) {
+    if (p.position.z >= -100) continue;  // Skip land plants
+    const cellX = Math.floor((p.position.x + WORLD_SIZE.width / 2) / DENSITY_CELL_SIZE);
+    const cellZ = Math.floor((-100 - p.position.z) / DENSITY_CELL_SIZE);  // 0 = near shore, 3 = deep
+    const key = `${cellX},${cellZ}`;
+    plantDensity[key] = (plantDensity[key] || 0) + 1;
+  }
 
-    // Bias toward water zones (70% water, 30% land)
-    let z;
-    if (Math.random() < 0.7) {
-      // Water zone
-      z = -100 - Math.random() * 400;
+  // Find cells with low plant density (depleted areas)
+  const depletedCells = [];
+  const targetDensityPerCell = 30;  // Aim for ~30 plants per 100x100 cell
+
+  for (let cx = 0; cx < xCells; cx++) {
+    for (let cz = 0; cz < waterZCells; cz++) {
+      const key = `${cx},${cz}`;
+      const count = plantDensity[key] || 0;
+      if (count < targetDensityPerCell) {
+        // This cell needs more plants - weight by how depleted it is
+        const deficit = targetDensityPerCell - count;
+        depletedCells.push({ cx, cz, deficit, count });
+      }
+    }
+  }
+
+  // Spawn plants - prioritize depleted areas
+  const populationRatio = plants.length / SIMULATION_CONFIG.maxPlants;
+  const plantsToSpawn = populationRatio < 0.5 ? 5 : (populationRatio < 0.8 ? 3 : 2);
+
+  for (let spawnIdx = 0; spawnIdx < plantsToSpawn && plants.length < SIMULATION_CONFIG.maxPlants; spawnIdx++) {
+    const spawnChance = SIMULATION_CONFIG.foodSpawnRate * (1 - populationRatio);
+    if (Math.random() > spawnChance) continue;
+
+    let x, z;
+
+    // 70% chance to spawn in a depleted area, 30% random
+    if (depletedCells.length > 0 && Math.random() < 0.7) {
+      // Pick a depleted cell weighted by deficit
+      const totalDeficit = depletedCells.reduce((sum, c) => sum + c.deficit, 0);
+      let pick = Math.random() * totalDeficit;
+      let selectedCell = depletedCells[0];
+
+      for (const cell of depletedCells) {
+        pick -= cell.deficit;
+        if (pick <= 0) {
+          selectedCell = cell;
+          break;
+        }
+      }
+
+      // Spawn within this cell
+      x = (selectedCell.cx * DENSITY_CELL_SIZE) - (WORLD_SIZE.width / 2) + Math.random() * DENSITY_CELL_SIZE;
+      z = -100 - (selectedCell.cz * DENSITY_CELL_SIZE) - Math.random() * DENSITY_CELL_SIZE;
     } else {
-      // Land zone
-      z = -100 + Math.random() * 600;
+      // Random spawn (80% water, 20% land)
+      x = (Math.random() - 0.5) * WORLD_SIZE.width * 0.95;
+      if (Math.random() < 0.8) {
+        z = -100 - Math.random() * 400;
+      } else {
+        z = -100 + Math.random() * 600;
+      }
     }
 
-    const terrainH = getTerrainHeight(x, z);
+    // Clamp to bounds
+    x = Math.max(-WORLD_SIZE.width / 2 + 5, Math.min(WORLD_SIZE.width / 2 - 5, x));
+    z = Math.max(-WORLD_SIZE.depth / 2 + 5, Math.min(WORLD_SIZE.depth / 2 - 5, z));
 
-    // Water zone is z < -100
+    const terrainH = getTerrainHeight(x, z);
     const isInWaterZone = z < -100;
     const isOnLand = !isInWaterZone;
 
     let y;
     if (isOnLand) {
-      // Land plants sit on the terrain surface
       y = terrainH + 0.5;
     } else {
-      // Water plants float throughout water column
       const waterDepth = Math.abs(terrainH);
       y = terrainH + 1 + Math.random() * Math.max(waterDepth * 0.6, 8);
     }
