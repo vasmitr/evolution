@@ -656,10 +656,10 @@ class WorkerCreature {
     // Reproduction using weights
     const rep = w.reproduction;
     if (this.mature && this.energy > rep.energyThresholdBase) {
-      // Predators reproduce at lower energy threshold to compensate for hunting difficulty
       let threshold = rep.energyThresholdBase + rep.energyThresholdRange * (1 - this.reproductionUrgency);
+      // Predators can reproduce at lower threshold (meat is calorie-dense)
       if (this.predatory > 0.5) {
-        threshold *= 0.7; // Predators need 30% less energy to reproduce
+        threshold *= 0.6; // Predators need 40% less energy to reproduce
       }
       if (this.energy > threshold) {
         return this.reproduce();
@@ -696,10 +696,10 @@ class WorkerCreature {
     if (Math.random() < successChance) {
       const damage = attackPower * (0.5 + Math.random() * 0.5);
       target.energy -= damage;
-      // Increased energy gain from successful attacks
-      const energyGain = damage * 0.8 * (1 + this.jaws * 0.5); // Was 0.5, now 0.8
+      // High energy gain from successful attacks (meat is nutritious)
+      const energyGain = damage * 0.9 * (1 + this.jaws * 0.5);
       this.energy += energyGain;
-      this.energy -= 3; // Reduced attack cost from 5 to 3
+      this.energy -= 2; // Low attack cost
 
       if (target.energy <= 0) {
         target.dead = true;
@@ -707,7 +707,7 @@ class WorkerCreature {
         return true;
       }
     } else {
-      this.energy -= 3;
+      this.energy -= 2; // Low cost for failed attack
     }
 
     return false;
@@ -1378,16 +1378,17 @@ function update(dt) {
         // Attack if close enough
         if (targetDist < 3 + c.size + targetPrey.size) {
           const killed = c.attack(targetPrey);
+
           if (killed) {
-            // Predator gets a big energy boost from the kill
-            const killBonus = 30 + targetPrey.size * 20;
+            // Predator gets big energy bonus from the kill
+            const killBonus = 40 + targetPrey.size * 30 + targetPrey.energy * 0.3;
             c.energy += killBonus;
-            
+
             // Create corpse from killed prey
             const corpse = new WorkerCorpse(targetPrey, nextCorpseId++);
             corpses.push(corpse);
             newCorpses.push(corpse.toData());
-            
+
             // Energy gained from kill (predator eats some immediately)
             energyStats.meat += killBonus + 20; // Track the bonus + base
           }
