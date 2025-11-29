@@ -1876,10 +1876,14 @@ class InstancedPlantRenderer {
   constructor(scene, maxPlants = 6000) {
     this.scene = scene;
     this.maxPlants = maxPlants;
-    this.plantData = new Map(); // id -> { index, isWater, age }
+    this.plantData = new Map(); // id -> { index, isWater, age, position }
     this.waterIndices = []; // Available indices for water plants
     this.landIndices = []; // Available indices for land plants
     this.time = 0;
+
+    // Culling settings
+    this.cullDistance = 400; // Don't update plants beyond this distance
+    this.camera = null; // Set by World
 
     // Shared geometry for all plants
     const geometry = new THREE.TetrahedronGeometry(0.5);
@@ -1905,6 +1909,10 @@ class InstancedPlantRenderer {
     this.waterMesh = new THREE.InstancedMesh(geometry, waterMaterial, waterCount);
     this.landMesh = new THREE.InstancedMesh(geometry, landMaterial, landCount);
 
+    // Use dynamic draw for frequently updated matrices
+    this.waterMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.landMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
     // Initialize with zero scale (invisible)
     const zeroMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
     for (let i = 0; i < waterCount; i++) {
@@ -1919,7 +1927,7 @@ class InstancedPlantRenderer {
     this.waterMesh.instanceMatrix.needsUpdate = true;
     this.landMesh.instanceMatrix.needsUpdate = true;
 
-    // Enable frustum culling
+    // Enable frustum culling on the mesh level
     this.waterMesh.frustumCulled = true;
     this.landMesh.frustumCulled = true;
 
@@ -1931,6 +1939,11 @@ class InstancedPlantRenderer {
     this._position = new THREE.Vector3();
     this._quaternion = new THREE.Quaternion();
     this._scale = new THREE.Vector3();
+    this._cameraPos = new THREE.Vector3();
+  }
+
+  setCamera(camera) {
+    this.camera = camera;
   }
 
   addPlant(data) {
@@ -1938,27 +1951,28 @@ class InstancedPlantRenderer {
     const indices = isWater ? this.waterIndices : this.landIndices;
 
     if (indices.length === 0) {
-      // No available slots - could expand or skip
       return false;
     }
 
     const index = indices.pop();
     const mesh = isWater ? this.waterMesh : this.landMesh;
 
-    // Store plant data
+    // Store plant data with position for distance checking
     this.plantData.set(data.id, {
       index,
       isWater,
       age: 0,
+      position: { x: data.position.x, y: data.position.y, z: data.position.z },
       rotation: new THREE.Euler(
         Math.random() * Math.PI,
         Math.random() * Math.PI,
         Math.random() * Math.PI
-      )
+      ),
+      visible: true
     });
 
     // Set initial transform
-    this.updatePlantMatrix(data, mesh, index, 0);
+    this.updatePlantMatrix(data, mesh, index, 0, true);
 
     return true;
   }
@@ -1966,24 +1980,55 @@ class InstancedPlantRenderer {
   updatePlant(data, dt) {
     const plantInfo = this.plantData.get(data.id);
     if (!plantInfo) {
-      // New plant - add it
       return this.addPlant(data);
     }
 
-    plantInfo.age += dt;
+    // Update stored position
+    plantInfo.position.x = data.position.x;
+    plantInfo.position.y = data.position.y;
+    plantInfo.position.z = data.position.z;
+
+    // Check distance from camera for culling
+    let shouldUpdate = true;
+    if (this.camera) {
+      this.camera.getWorldPosition(this._cameraPos);
+      const dx = data.position.x - this._cameraPos.x;
+      const dy = data.position.y - this._cameraPos.y;
+      const dz = data.position.z - this._cameraPos.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      shouldUpdate = distSq < this.cullDistance * this.cullDistance;
+    }
+
     const mesh = plantInfo.isWater ? this.waterMesh : this.landMesh;
-    this.updatePlantMatrix(data, mesh, plantInfo.index, plantInfo.age);
+
+    if (shouldUpdate) {
+      plantInfo.age += dt;
+      plantInfo.visible = true;
+      this.updatePlantMatrix(data, mesh, plantInfo.index, plantInfo.age, true);
+    } else if (plantInfo.visible) {
+      // Hide plant - set to zero scale
+      plantInfo.visible = false;
+      this._matrix.makeScale(0, 0, 0);
+      mesh.setMatrixAt(plantInfo.index, this._matrix);
+    }
+    // If already hidden, skip entirely
 
     return true;
   }
 
-  updatePlantMatrix(data, mesh, index, age) {
+  updatePlantMatrix(data, mesh, index, age, visible) {
+    if (!visible) {
+      this._matrix.makeScale(0, 0, 0);
+      mesh.setMatrixAt(index, this._matrix);
+      return;
+    }
+
+    const plantInfo = this.plantData.get(data.id);
+
     // Calculate scale based on energy + pulse
     const energyScale = 0.5 + (data.energy / 80) * 0.5;
     const pulse = 1 + Math.sin(age * 2) * 0.1;
     const scale = energyScale * pulse;
-
-    const plantInfo = this.plantData.get(data.id);
 
     this._position.set(data.position.x, data.position.y, data.position.z);
     this._quaternion.setFromEuler(plantInfo.rotation);
@@ -2198,6 +2243,7 @@ export class World {
     // Create instanced renderers for plants and corpses
     // These use InstancedMesh for massive performance gains
     this.plantRenderer = new InstancedPlantRenderer(this.scene, 8000);
+    this.plantRenderer.setCamera(this.camera); // Enable distance-based culling
     this.corpseRenderer = new InstancedCorpseRenderer(this.scene, 500);
   }
 
