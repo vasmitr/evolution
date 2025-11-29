@@ -48,7 +48,11 @@ export const DEFAULT_GENE_WEIGHTS = {
     limbs: 0.01,
     jaws: 0.01,
     predatory: 0.01,      // High-stress metabolism
-    filterFeeding: 0.002  // Very cheap passive system
+    filterFeeding: 0.002, // Very cheap passive system
+    parasitic: 0.008,     // Specialized feeding structures
+    scavenging: 0.003,    // Keen sense of decay
+    maneuverability: 0.005, // Flexible body maintenance
+    reproductionUrgency: 0.002 // Reproductive system readiness
   },
 
   // Development costs (one-time cost to grow the feature)
@@ -67,7 +71,11 @@ export const DEFAULT_GENE_WEIGHTS = {
     limbs: 20,
     jaws: 22,
     predatory: 5,
-    filterFeeding: 3
+    filterFeeding: 3,
+    parasitic: 12,        // Attachment organs and feeding tube
+    scavenging: 4,        // Scent detection for decay
+    maneuverability: 8,   // Flexible body development
+    reproductionUrgency: 2 // Reproductive maturation
   },
 
   // Sense effectiveness in different environments
@@ -103,12 +111,13 @@ export const DEFAULT_GENE_WEIGHTS = {
 
   // Movement weights
   movement: {
-    maxSpeedBase: 0.1,
-    maxSpeedFromSpeed: 0.3,
-    maxForceBase: 0.01,
-    maxForceFromManeuver: 0.02,
-    limbsWaterDrag: 0.5,  // Limbs create drag in water
-    limbsLandBonus: 0.3   // Limbs help on land
+    maxSpeedBase: 0.3,
+    maxSpeedFromSpeed: 0.7,
+    maxForceBase: 0.05,
+    maxForceFromManeuver: 0.15,
+    limbsWaterDrag: 0.3,  // Limbs create drag in water (reduced penalty)
+    limbsLandBonus: 0.5,  // Limbs help on land (increased bonus)
+    limbsSwimBonus: 0.3   // Limbs can help swimming when adapted
   },
 
   // Filter feeding (passive food intake)

@@ -1102,6 +1102,47 @@ function update(dt) {
       }
     }
 
+    // Active swimming/movement behavior - creatures with speed actively move
+    // This gives evolved speed genes a purpose even when not hunting/foraging
+    if (c.speed > 0.1 || c.maneuverability > 0.1) {
+      const swimForce = c.maxForce * (0.3 + c.speed * 0.5 + c.maneuverability * 0.2);
+
+      if (isInWater) {
+        // Swimming - random exploration with momentum
+        if (Math.random() < 0.03 * (1 + c.maneuverability)) {
+          // Change direction occasionally (more often with high maneuverability)
+          const angle = Math.random() * Math.PI * 2;
+          c.acceleration.x += Math.cos(angle) * swimForce;
+          c.acceleration.z += Math.sin(angle) * swimForce;
+          // Slight vertical movement for 3D swimming
+          c.acceleration.y += (Math.random() - 0.5) * swimForce * 0.3;
+        } else if (Math.random() < 0.1) {
+          // Continue in roughly same direction with small adjustments
+          const vLen = Math.sqrt(c.velocity.x ** 2 + c.velocity.z ** 2);
+          if (vLen > 0.01) {
+            // Boost in current direction
+            c.acceleration.x += (c.velocity.x / vLen) * swimForce * 0.5;
+            c.acceleration.z += (c.velocity.z / vLen) * swimForce * 0.5;
+          }
+        }
+
+        // Limbs can aid swimming when creature learns to use them
+        if (c.limbs > 0.2) {
+          const limbSwimBonus = c.limbs * c.dna.weights.movement.limbsSwimBonus;
+          c.acceleration.x *= (1 + limbSwimBonus);
+          c.acceleration.z *= (1 + limbSwimBonus);
+        }
+      } else if (c.limbs > 0.3) {
+        // Land movement - requires limbs
+        if (Math.random() < 0.05 * c.limbs) {
+          const angle = Math.random() * Math.PI * 2;
+          const landForce = swimForce * c.limbs;
+          c.acceleration.x += Math.cos(angle) * landForce;
+          c.acceleration.z += Math.sin(angle) * landForce;
+        }
+      }
+    }
+
     // Hunting behavior - predatory creatures seek prey
     if (c.mature && c.predatory > 0.3 && c.jaws > 0.2 && c.energy < 100) {
       // Calculate water depth for sense effectiveness
@@ -1199,6 +1240,76 @@ function update(dt) {
           c.scavenge(corpse);
           if (corpse.energy <= 0) {
             corpse.dead = true;
+          }
+        }
+      }
+    }
+
+    // Parasitic behavior - parasites seek larger hosts and drain energy
+    if (c.parasitic > 0.3 && c.energy < 80) {
+      const nearbyHosts = creatureSpatialGrid.getNearby(c.position.x, c.position.z, 2);
+
+      let bestHost = null;
+      let bestScore = -Infinity;
+      let bestDist = 0;
+
+      for (const host of nearbyHosts) {
+        if (host === c || host.dead) continue;
+
+        // Parasites prefer larger, slower hosts with less armor
+        const sizeDiff = host.size - c.size;
+        if (sizeDiff < 0.1) continue; // Host must be larger
+
+        const dx = host.position.x - c.position.x;
+        const dy = host.position.y - c.position.y;
+        const dz = host.position.z - c.position.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        // Score hosts: prefer large, slow, low-armor, high-energy targets
+        const score = sizeDiff * 30 +
+                     (1 - host.speed) * 20 -
+                     host.armor * 40 +
+                     host.energy * 0.2 -
+                     dist * 0.3 -
+                     host.toxicity * 50;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestHost = host;
+          bestDist = dist;
+        }
+      }
+
+      if (bestHost) {
+        const dx = bestHost.position.x - c.position.x;
+        const dy = bestHost.position.y - c.position.y;
+        const dz = bestHost.position.z - c.position.z;
+
+        // Move towards host
+        if (bestDist > 2 + c.size + bestHost.size) {
+          const parasiteSpeed = c.maxForce * (0.5 + c.parasitic * 0.5);
+          c.acceleration.x += (dx / bestDist) * parasiteSpeed;
+          c.acceleration.y += (dy / bestDist) * parasiteSpeed * 0.3;
+          c.acceleration.z += (dz / bestDist) * parasiteSpeed;
+        } else {
+          // Attached to host - drain energy
+          const drainRate = c.parasitic * 3 * (1 - bestHost.armor * 0.5);
+          const drainAmount = drainRate * dt;
+
+          // Check if host's toxicity damages parasite
+          if (bestHost.toxicity > c.toxicity) {
+            const toxicDamage = (bestHost.toxicity - c.toxicity) * 2 * dt;
+            c.energy -= toxicDamage;
+          }
+
+          if (drainAmount > 0 && bestHost.energy > 10) {
+            bestHost.energy -= drainAmount;
+            c.energy += drainAmount * 0.8; // Some energy lost in transfer
+
+            // Follow host movement
+            c.position.x = bestHost.position.x + (dx / bestDist) * (c.size + bestHost.size) * 0.5;
+            c.position.y = bestHost.position.y + (dy / bestDist) * (c.size + bestHost.size) * 0.5;
+            c.position.z = bestHost.position.z + (dz / bestDist) * (c.size + bestHost.size) * 0.5;
           }
         }
       }
@@ -1476,12 +1587,23 @@ function update(dt) {
       if (dist < 2 + c.size) {
         // Herbivore efficiency - non-predatory creatures digest plants better
         const herbivoreBonus = 1 + (1 - c.predatory) * 0.5;
-        c.eat(p.energy * herbivoreBonus);
-        p.dead = true;
-        eatenPlantIds.push(p.id);
+        // Jaws allow taking bigger bites from plants
+        const jawsBonus = 1 + c.jaws * 0.5;
+        // Size affects how much can be consumed
+        const sizeBonus = 1 + c.size * 0.3;
+        const totalEfficiency = herbivoreBonus * jawsBonus * sizeBonus;
 
-        const idx = plants.indexOf(p);
-        if (idx > -1) plants.splice(idx, 1);
+        // Without jaws, can only nibble - with jaws, can consume whole plant
+        const consumeAmount = c.jaws > 0.2 ? p.energy : Math.min(p.energy, 10 + c.size * 5);
+        c.eat(consumeAmount * totalEfficiency);
+        p.energy -= consumeAmount;
+
+        if (p.energy <= 0) {
+          p.dead = true;
+          eatenPlantIds.push(p.id);
+          const idx = plants.indexOf(p);
+          if (idx > -1) plants.splice(idx, 1);
+        }
         break;  // One plant per frame per creature
       }
     }
