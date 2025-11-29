@@ -144,6 +144,92 @@ export const DEFAULT_GENE_WEIGHTS = {
     complexityPenalty: 0.2,
     efficiencyBonus: 0.5,
   },
+
+  // Phenotype weights - how genes and their variativeness affect physical form
+  // These create visible differences in creature appearance and physics
+  phenotype: {
+    // Limb characteristics (affected by limbs gene + variativeness)
+    limbs: {
+      // High variativeness = longer, thinner limbs (good for running/swimming)
+      // Low variativeness = shorter, sturdier limbs (good for stability/climbing)
+      lengthBase: 0.5, // Base limb length multiplier
+      lengthFromVariativeness: 1.0, // How much variativeness extends limbs
+      widthBase: 0.3, // Base limb width
+      widthFromVariativeness: -0.2, // High variativeness = thinner limbs
+      
+      // Limb count affected by limbs gene value
+      countMin: 0,
+      countMax: 6,
+    },
+    
+    // Body streamlining (affected by maneuverability + speed)
+    body: {
+      // High variativeness in maneuverability = more streamlined (good for swimming)
+      // Low variativeness = more compact/round (good for stability)
+      streamliningBase: 1.0, // Length/width ratio
+      streamliningFromManeuver: 0.8, // Maneuverability variativeness effect
+      streamliningFromSpeed: 0.5, // Speed variativeness effect
+      
+      // Body flexibility
+      flexibilityFromManeuver: 1.0, // Affects turning radius
+    },
+    
+    // Fins/appendages (affected by maneuverability in water)
+    fins: {
+      // High variativeness = larger fins (better swimming, more drag on land)
+      // Low variativeness = smaller fins (less efficient swimming, less drag)
+      sizeBase: 0.2,
+      sizeFromVariativeness: 0.8,
+      countFromManeuver: 4, // Max number of fins
+      
+      // Fin shape
+      aspectRatioBase: 1.5, // Length/width of fins
+      aspectRatioFromVariativeness: 1.0, // High = longer, narrower fins
+    },
+    
+    // Wings (affected by limbs + maneuverability for flying)
+    wings: {
+      // High variativeness in both = larger wing surface
+      spanBase: 0.5,
+      spanFromLimbVariativeness: 1.5,
+      spanFromManeuverVariativeness: 1.0,
+      
+      // Wing loading (body mass / wing area)
+      // Lower is better for flight
+      minWingLoading: 0.5,
+    },
+    
+    // Jaw/mouth characteristics
+    jaws: {
+      // High variativeness = larger, more powerful jaws
+      sizeBase: 0.3,
+      sizeFromVariativeness: 0.7,
+      
+      // Bite force multiplier
+      forceFromVariativeness: 1.5,
+    },
+    
+    // Armor plating
+    armor: {
+      // High variativeness = thicker, heavier armor
+      // Low variativeness = lighter, more flexible armor
+      thicknessBase: 0.2,
+      thicknessFromVariativeness: 0.8,
+      coverageBase: 0.5, // % of body covered
+      coverageFromValue: 0.5, // Gene value affects coverage
+      
+      // Mass penalty
+      massPenaltyFromVariativeness: 0.3,
+    },
+    
+    // Sensory organs (eyes, ears, antennae)
+    sensors: {
+      // High variativeness = larger, more prominent sensors
+      eyeSizeFromSightVariativeness: 1.0,
+      earSizeFromHearingVariativeness: 0.8,
+      antennaSizeFromSmellVariativeness: 1.2,
+    },
+  },
 };
 
 // Weight mutation config

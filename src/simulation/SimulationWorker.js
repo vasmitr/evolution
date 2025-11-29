@@ -141,23 +141,123 @@ function deepClone(obj) {
   return cloned;
 }
 
+// Possible emergent features from gene interactions
+const EMERGENT_FEATURES = ['wings', 'bioluminescence', 'spikes', 'tail', 'horn', 'shell'];
+
 // DNA class - carries both gene values and weight matrices
 class DNA {
-  constructor(genes = null, weights = null) {
+  constructor(genes = null, weights = null, variativeness = null, interactions = null) {
     // Gene values (0-1 range)
     this.genes = {};
-    Object.keys(GENE_DEFINITIONS).forEach(key => {
+    // Gene variativeness (0-1 range) - controls physical form/type of features
+    this.variativeness = {};
+
+    const geneKeys = Object.keys(GENE_DEFINITIONS);
+
+    geneKeys.forEach(key => {
       if (genes && genes[key] !== undefined) {
-        // Accept either {value: x} or just x
+        // Accept either {value: x, variativeness: y} or just x
         const val = typeof genes[key] === 'object' ? genes[key].value : genes[key];
         this.genes[key] = Math.max(0, Math.min(1, val));
       } else {
         this.genes[key] = 0; // Start at 0 - blind filter feeders
       }
+
+      // Initialize variativeness
+      if (variativeness && variativeness[key] !== undefined) {
+        this.variativeness[key] = Math.max(0, Math.min(1, variativeness[key]));
+      } else {
+        // Random initial variativeness for diversity
+        this.variativeness[key] = Math.random();
+      }
     });
+
+    // Gene interactions - randomly generated coefficients that determine
+    // how gene combinations produce emergent features
+    // Each interaction maps a gene pair to a feature with a weight
+    if (interactions) {
+      this.interactions = deepClone(interactions);
+    } else {
+      this.interactions = this.generateRandomInteractions(geneKeys);
+    }
 
     // Weight matrix - each creature carries its own copy
     this.weights = weights ? deepClone(weights) : deepClone(DEFAULT_GENE_WEIGHTS);
+  }
+
+  // Generate random gene interaction coefficients
+  generateRandomInteractions(geneKeys) {
+    const interactions = {};
+
+    // Each emergent feature gets random gene pair interactions
+    EMERGENT_FEATURES.forEach(feature => {
+      interactions[feature] = {
+        // Pick 2-4 random gene pairs that contribute to this feature
+        pairs: [],
+        threshold: 0.5 + Math.random() * 0.5, // 0.5 to 1.0 threshold to activate
+      };
+
+      const numPairs = 2 + Math.floor(Math.random() * 3); // 2-4 pairs
+      const usedPairs = new Set();
+
+      for (let i = 0; i < numPairs; i++) {
+        // Pick two different genes
+        const gene1 = geneKeys[Math.floor(Math.random() * geneKeys.length)];
+        let gene2 = geneKeys[Math.floor(Math.random() * geneKeys.length)];
+        while (gene2 === gene1) {
+          gene2 = geneKeys[Math.floor(Math.random() * geneKeys.length)];
+        }
+
+        const pairKey = [gene1, gene2].sort().join('+');
+        if (usedPairs.has(pairKey)) continue;
+        usedPairs.add(pairKey);
+
+        interactions[feature].pairs.push({
+          gene1,
+          gene2,
+          weight: (Math.random() - 0.3) * 2, // -0.6 to 1.4 (bias toward positive)
+          useVariativeness: Math.random() > 0.7, // 30% chance to use variativeness instead
+        });
+      }
+    });
+
+    return interactions;
+  }
+
+  // Calculate emergent feature values based on gene interactions
+  getEmergentFeatures() {
+    const features = {};
+
+    EMERGENT_FEATURES.forEach(feature => {
+      const interaction = this.interactions[feature];
+      if (!interaction || !interaction.pairs.length) {
+        features[feature] = 0;
+        return;
+      }
+
+      // Sum up contributions from all gene pairs
+      let total = 0;
+      interaction.pairs.forEach(pair => {
+        const val1 = pair.useVariativeness
+          ? this.variativeness[pair.gene1] || 0
+          : this.genes[pair.gene1] || 0;
+        const val2 = pair.useVariativeness
+          ? this.variativeness[pair.gene2] || 0
+          : this.genes[pair.gene2] || 0;
+
+        // Multiplicative interaction - both genes need to be present
+        total += val1 * val2 * pair.weight;
+      });
+
+      // Normalize and apply threshold
+      const normalized = total / interaction.pairs.length;
+      features[feature] = normalized > interaction.threshold
+        ? (normalized - interaction.threshold) / (1 - interaction.threshold)
+        : 0;
+      features[feature] = Math.max(0, Math.min(1, features[feature]));
+    });
+
+    return features;
   }
 
   // Mutate gene values
@@ -185,6 +285,13 @@ class DNA {
         }
 
         this.genes[randomKey] = Math.max(0, Math.min(1, currentVal + mutation));
+
+        // Also mutate variativeness sometimes (affects limb type, etc.)
+        if (Math.random() < 0.3) {
+          const varMutation = gaussianRandom() * 0.15;
+          this.variativeness[randomKey] = Math.max(0, Math.min(1,
+            this.variativeness[randomKey] + varMutation));
+        }
       }
       return true;
     }
@@ -230,14 +337,47 @@ class DNA {
     return false;
   }
 
+  // Mutate gene interaction weights
+  mutateInteractions() {
+    if (Math.random() < 0.1) { // 10% chance to mutate interactions
+      const features = Object.keys(this.interactions);
+      const feature = features[Math.floor(Math.random() * features.length)];
+      const interaction = this.interactions[feature];
+
+      if (interaction.pairs.length > 0) {
+        const pairIdx = Math.floor(Math.random() * interaction.pairs.length);
+        const pair = interaction.pairs[pairIdx];
+
+        // Mutate weight or threshold
+        if (Math.random() < 0.7) {
+          // Mutate pair weight
+          pair.weight += gaussianRandom() * 0.3;
+          pair.weight = Math.max(-1.5, Math.min(2.0, pair.weight));
+        } else {
+          // Mutate threshold
+          interaction.threshold += gaussianRandom() * 0.1;
+          interaction.threshold = Math.max(0.2, Math.min(1.0, interaction.threshold));
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+
   mutate() {
     const genesMutated = this.mutateGenes();
     const weightsMutated = this.mutateWeights();
-    return genesMutated || weightsMutated;
+    const interactionsMutated = this.mutateInteractions();
+    return genesMutated || weightsMutated || interactionsMutated;
   }
 
   clone() {
-    return new DNA(deepClone(this.genes), deepClone(this.weights));
+    return new DNA(
+      deepClone(this.genes),
+      deepClone(this.weights),
+      deepClone(this.variativeness),
+      deepClone(this.interactions)
+    );
   }
 
   getGene(key) {
@@ -262,7 +402,9 @@ class DNA {
   toData() {
     return {
       genes: deepClone(this.genes),
-      weights: deepClone(this.weights)
+      weights: deepClone(this.weights),
+      variativeness: deepClone(this.variativeness),
+      interactions: deepClone(this.interactions)
     };
   }
 }
@@ -640,11 +782,18 @@ class WorkerCreature {
       jaws: this.jaws,
       predatory: this.predatory,
       scavenging: this.scavenging,
+      parasitic: this.parasitic,
       lungCapacity: this.lungCapacity,
       sight: this.sight,
       smell: this.smell,
       hearing: this.hearing,
       filterFeeding: this.filterFeeding,
+      // Pass variativeness for visual limb type (fins/legs/claws)
+      limbsVariativeness: this.dna.variativeness.limbs,
+      jawsVariativeness: this.dna.variativeness.jaws,
+      speed: this.speed,
+      // Emergent features from gene interactions
+      emergentFeatures: this.dna.getEmergentFeatures(),
       dna: this.dna.toData()
     };
   }

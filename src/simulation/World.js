@@ -7,20 +7,27 @@ import { WORLD_SIZE, BIOMES } from './Constants.js';
 // Shared geometries and materials for performance
 const SharedGeometries = {
   body: {
-    sphere: new THREE.SphereGeometry(1, 8, 8),
+    sphere: new THREE.IcosahedronGeometry(1, 2), // More organic
     torpedo: new THREE.CapsuleGeometry(0.4, 1.2, 4, 8),
-    flat: new THREE.SphereGeometry(1, 8, 6),
+    flat: new THREE.SphereGeometry(1, 12, 8),
   },
-  eye: new THREE.SphereGeometry(0.15, 6, 6),
-  pupil: new THREE.SphereGeometry(0.08, 4, 4),
-  limb: new THREE.CapsuleGeometry(0.06, 0.4, 3, 6),
-  foot: new THREE.SphereGeometry(0.1, 4, 4),
+  eye: new THREE.SphereGeometry(0.12, 12, 12),
+  iris: new THREE.CircleGeometry(0.06, 12),
+  pupil: new THREE.CircleGeometry(0.03, 8),
+  socket: new THREE.SphereGeometry(0.14, 8, 6),
+  limb: new THREE.CylinderGeometry(0.04, 0.06, 0.3, 6),
+  joint: new THREE.SphereGeometry(0.07, 6, 6),
+  foot: new THREE.SphereGeometry(0.08, 6, 6),
   fin: new THREE.BoxGeometry(0.02, 0.3, 0.2),
   tailFin: new THREE.BoxGeometry(0.02, 0.25, 0.35),
-  jaw: new THREE.BoxGeometry(0.3, 0.08, 0.15),
-  tooth: new THREE.ConeGeometry(0.03, 0.1, 3),
-  spike: new THREE.ConeGeometry(0.05, 0.25, 3),
+  mandible: new THREE.CylinderGeometry(0.02, 0.05, 0.25, 6),
+  tooth: new THREE.ConeGeometry(0.02, 0.06, 3),
+  spike: new THREE.ConeGeometry(0.04, 0.2, 4),
+  carapace: new THREE.SphereGeometry(1.05, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.6),
   probe: new THREE.CylinderGeometry(0.03, 0.015, 0.5, 4),
+  // Emergent feature geometries
+  horn: new THREE.ConeGeometry(0.08, 0.4, 6),
+  tailSegment: new THREE.CylinderGeometry(0.06, 0.04, 0.2, 6),
 };
 
 // Rendering-only creature (mesh wrapper)
@@ -41,11 +48,11 @@ class CreatureRenderer {
     const bodyColor = this.getBodyColor(data);
     const bodyMat = new THREE.MeshStandardMaterial({
       color: bodyColor,
-      roughness: 0.7,
-      metalness: 0.1
+      roughness: 0.6,
+      metalness: 0.05
     });
 
-    // Body shape - simpler selection
+    // Body shape - organic icosahedron base
     let bodyGeo;
     if (data.speed > 0.5) {
       bodyGeo = SharedGeometries.body.torpedo;
@@ -61,9 +68,10 @@ class CreatureRenderer {
     }
     this.mesh.add(this.bodyMesh);
 
-    // Scale based on size
+    // Scale based on size with slight elongation
     const scale = 0.8 + data.size * 1.2;
-    this.mesh.scale.set(scale, scale, scale);
+    const lengthRatio = 1.0 + data.speed * 0.3; // Faster = more elongated
+    this.mesh.scale.set(scale, scale * 0.9, scale * lengthRatio);
 
     // Create feature groups
     this.eyesGroup = new THREE.Group();
@@ -71,12 +79,17 @@ class CreatureRenderer {
     this.finsGroup = new THREE.Group();
     this.jawsGroup = new THREE.Group();
     this.armorGroup = new THREE.Group();
+    this.emergentGroup = new THREE.Group(); // For emergent features
 
     this.mesh.add(this.eyesGroup);
     this.mesh.add(this.limbsGroup);
     this.mesh.add(this.finsGroup);
     this.mesh.add(this.jawsGroup);
     this.mesh.add(this.armorGroup);
+    this.mesh.add(this.emergentGroup);
+
+    // Store body color for limbs
+    this.bodyColor = bodyColor;
 
     // Build features
     this.buildEyes(data);
@@ -85,6 +98,7 @@ class CreatureRenderer {
     this.buildJaws(data);
     this.buildArmor(data);
     this.buildSpecialFeatures(data);
+    this.buildEmergentFeatures(data, bodyColor);
   }
 
   getBodyColor(data) {
@@ -108,77 +122,236 @@ class CreatureRenderer {
       return new THREE.Color(0xcc8844); // Tan = heat adapted
     }
     // Default - greenish based on how "herbivore-like"
-    const greenness = 0.3 + (1 - data.predatory) * 0.4;
+    // HSL hue: 0.0=red, 0.33=green, 0.66=blue
+    // Low predatory = more green (hue ~0.33), high predatory = more yellow/orange (hue ~0.1)
+    const greenness = 0.33 - data.predatory * 0.2; // 0.33 (green) to 0.13 (yellow-orange)
     return new THREE.Color().setHSL(greenness, 0.6, 0.45);
   }
 
   buildEyes(data) {
     if (data.sight < 0.15) return; // No visible eyes for blind creatures
 
-    const eyeWhiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
-    const pupilMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+    const eyeScale = 0.7 + data.sight * 0.5;
 
-    // Eye size scales with sight
-    const eyeScale = 0.8 + data.sight * 0.6;
+    // Position eyes ON the body surface (body radius is ~1)
+    const eyeSpacing = 0.35;
+    const eyeForward = 0.92;  // On front surface
+    const eyeHeight = 0.25;
 
-    // Two eyes on the front of body
-    const eyeSpacing = 0.25;
-    const eyeForward = 0.85;
-    const eyeHeight = 0.15;
+    const eyeWhiteMat = new THREE.MeshStandardMaterial({
+      color: 0xf8f8f5,
+      roughness: 0.2,
+      metalness: 0.1
+    });
+
+    // Random iris color
+    const irisHue = Math.random() * 0.2 + 0.05;
+    const irisMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color().setHSL(irisHue, 0.7, 0.4),
+      roughness: 0.3
+    });
+
+    const pupilMat = new THREE.MeshStandardMaterial({ color: 0x050505 });
+    const highlightMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
 
     [-1, 1].forEach((side) => {
-      // Eye white
+      // Calculate position on body surface
+      const eyeX = side * eyeSpacing;
+      const eyeY = eyeHeight;
+      const eyeZ = eyeForward;
+
+      // Normalize to push onto sphere surface and then out a bit
+      const len = Math.sqrt(eyeX*eyeX + eyeY*eyeY + eyeZ*eyeZ);
+      const surfaceX = eyeX / len * 1.02;
+      const surfaceY = eyeY / len * 1.02;
+      const surfaceZ = eyeZ / len * 1.02;
+
+      // Eyeball - sits on surface
       const eye = new THREE.Mesh(SharedGeometries.eye, eyeWhiteMat);
-      eye.position.set(side * eyeSpacing, eyeHeight, eyeForward);
+      eye.position.set(surfaceX, surfaceY, surfaceZ);
       eye.scale.setScalar(eyeScale);
       this.eyesGroup.add(eye);
 
+      // Iris (on front of eyeball)
+      const iris = new THREE.Mesh(SharedGeometries.iris, irisMat);
+      iris.position.set(surfaceX, surfaceY, surfaceZ + 0.1 * eyeScale);
+      iris.scale.setScalar(eyeScale);
+      this.eyesGroup.add(iris);
+
       // Pupil
       const pupil = new THREE.Mesh(SharedGeometries.pupil, pupilMat);
-      pupil.position.set(side * eyeSpacing, eyeHeight, eyeForward + 0.1 * eyeScale);
+      pupil.position.set(surfaceX, surfaceY, surfaceZ + 0.105 * eyeScale);
       pupil.scale.setScalar(eyeScale);
-      pupil.userData.baseX = side * eyeSpacing;
+      pupil.userData.baseX = surfaceX;
       this.eyesGroup.add(pupil);
+
+      // Specular highlight
+      const highlight = new THREE.Mesh(SharedGeometries.pupil, highlightMat);
+      highlight.position.set(
+        surfaceX + 0.02 * eyeScale,
+        surfaceY + 0.02 * eyeScale,
+        surfaceZ + 0.11 * eyeScale
+      );
+      highlight.scale.setScalar(eyeScale * 0.4);
+      this.eyesGroup.add(highlight);
     });
   }
 
   buildLimbs(data, bodyColor) {
-    if (data.limbs < 0.25) return;
+    // Gene VALUE controls SIZE (0=none, 1=big limbs)
+    // Gene VARIATIVENESS controls TYPE (fins for aquatic, legs for land, claws for predation)
 
+    const limbValue = data.limbs;  // Controls SIZE
+    const limbVariativeness = data.limbsVariativeness || 0.5;  // Controls TYPE (default to legs)
+
+    if (limbValue < 0.15) return;  // No limbs for low value
+
+    // SIZE based on gene VALUE
+    const limbScale = 0.3 + limbValue * 1.0;  // 0.3 to 1.3 scale factor
+    const limbLength = 0.25 + limbValue * 0.4;  // Scales with value
+
+    // Number of limbs scales with value too
+    const limbCount = limbValue > 0.7 ? 6 : (limbValue > 0.4 ? 4 : 2);
+
+    // TYPE based on gene VARIATIVENESS
+    // Low variativeness (0-0.33): FINS (aquatic, flat paddle-like)
+    // Medium variativeness (0.33-0.66): LEGS (land locomotion, jointed)
+    // High variativeness (0.66-1.0): CLAWS (predatory, pincers)
+    let limbType;
+    if (limbVariativeness < 0.33) {
+      limbType = 'fin';
+    } else if (limbVariativeness < 0.66) {
+      limbType = 'leg';
+    } else {
+      limbType = 'claw';
+    }
+
+    const limbColor = bodyColor.clone().multiplyScalar(0.7);
     const limbMat = new THREE.MeshStandardMaterial({
-      color: bodyColor.clone().multiplyScalar(0.75)
+      color: limbColor,
+      roughness: 0.7
     });
 
-    // Number of limbs: 2 for low, 4 for medium, 6 for high
-    const limbCount = data.limbs > 0.6 ? 6 : (data.limbs > 0.4 ? 4 : 2);
-    const limbLength = 0.5 + data.limbs * 0.4;
-
-    // Create limb pairs symmetrically
     for (let i = 0; i < limbCount; i++) {
       const pairIndex = Math.floor(i / 2);
       const side = (i % 2 === 0) ? -1 : 1;
-      const zPos = 0.3 - pairIndex * 0.35; // Front to back
+      const zOffset = 0.15 - pairIndex * 0.25;
 
-      // Upper limb segment
-      const limb = new THREE.Mesh(SharedGeometries.limb, limbMat);
-      limb.scale.y = limbLength;
-      limb.position.set(side * 0.6, -0.2, zPos);
-      limb.rotation.z = side * 0.4; // Angle outward
-      limb.rotation.x = 0.3;
-      limb.userData.side = side;
-      limb.userData.pairIndex = pairIndex;
-      this.limbsGroup.add(limb);
+      const limbGroup = new THREE.Group();
 
-      // Foot/paddle
-      const foot = new THREE.Mesh(SharedGeometries.foot, limbMat);
-      foot.position.set(
-        side * (0.6 + limbLength * 0.3),
-        -0.2 - limbLength * 0.5,
-        zPos
-      );
-      foot.scale.set(1, 0.6, 1.3); // Flattened paddle shape
-      foot.userData.isFootOf = this.limbsGroup.children.length - 1;
-      this.limbsGroup.add(foot);
+      if (limbType === 'fin') {
+        // === FINS - Flat paddle-like for swimming ===
+        const finMat = new THREE.MeshStandardMaterial({
+          color: limbColor,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.85,
+          roughness: 0.5
+        });
+
+        // Use existing fin geometry scaled by limb value
+        const fin = new THREE.Mesh(SharedGeometries.fin, finMat);
+        fin.scale.set(1, limbScale * 1.5, limbScale * 1.2);
+        limbGroup.add(fin);
+
+        // Position fins on sides
+        limbGroup.position.set(side * 0.9, 0, zOffset);
+        limbGroup.rotation.z = side * 0.8;
+        limbGroup.rotation.y = side * 0.3;
+
+      } else if (limbType === 'claw') {
+        // === CLAWS - Pincers for predation ===
+        // Socket
+        const socket = new THREE.Mesh(SharedGeometries.joint, limbMat);
+        socket.scale.setScalar(limbScale * 1.2);
+        limbGroup.add(socket);
+
+        // Upper arm
+        const upperArm = new THREE.Mesh(SharedGeometries.limb, limbMat);
+        upperArm.scale.set(limbScale * 1.1, limbLength * 1.2, limbScale * 1.1);
+        upperArm.position.y = -limbLength * 0.2;
+        limbGroup.add(upperArm);
+
+        // Forearm
+        const forearm = new THREE.Mesh(SharedGeometries.limb, limbMat);
+        forearm.scale.set(limbScale * 0.9, limbLength * 1.0, limbScale * 0.9);
+        forearm.position.y = -limbLength * 0.55;
+        limbGroup.add(forearm);
+
+        // Pincer claws
+        const pincerMat = limbMat.clone();
+        pincerMat.color.multiplyScalar(0.75);
+
+        const pincer1 = new THREE.Mesh(SharedGeometries.spike, pincerMat);
+        pincer1.scale.setScalar(limbScale * 1.5);
+        pincer1.position.set(0.08 * limbScale, -limbLength * 0.85, 0);
+        pincer1.rotation.z = -0.3;
+        pincer1.rotation.x = Math.PI;
+        limbGroup.add(pincer1);
+
+        const pincer2 = new THREE.Mesh(SharedGeometries.spike, pincerMat);
+        pincer2.scale.setScalar(limbScale * 1.5);
+        pincer2.position.set(-0.08 * limbScale, -limbLength * 0.85, 0);
+        pincer2.rotation.z = 0.3;
+        pincer2.rotation.x = Math.PI;
+        limbGroup.add(pincer2);
+
+        limbGroup.userData.isClaw = true;
+
+        // Position claws on lower sides
+        const attachX = side * 0.95;
+        const attachY = -0.25;
+        const len = Math.sqrt(attachX*attachX + attachY*attachY + zOffset*zOffset);
+        limbGroup.position.set(attachX / len, attachY / len, zOffset / len);
+        limbGroup.rotation.z = side * 0.5;
+        limbGroup.rotation.x = 0.2;
+
+      } else {
+        // === LEGS - Jointed for land locomotion (default) ===
+        // Socket
+        const socket = new THREE.Mesh(SharedGeometries.joint, limbMat);
+        socket.scale.set(limbScale * 1.1, limbScale * 0.9, limbScale * 1.1);
+        limbGroup.add(socket);
+
+        // Thigh
+        const thigh = new THREE.Mesh(SharedGeometries.limb, limbMat);
+        thigh.scale.set(limbScale * 1.1, limbLength * 1.4, limbScale * 1.1);
+        thigh.position.y = -limbLength * 0.2;
+        limbGroup.add(thigh);
+
+        // Knee
+        const knee = new THREE.Mesh(SharedGeometries.joint, limbMat);
+        knee.scale.setScalar(limbScale * 0.85);
+        knee.position.y = -limbLength * 0.42;
+        limbGroup.add(knee);
+
+        // Shin
+        const shin = new THREE.Mesh(SharedGeometries.limb, limbMat);
+        shin.scale.set(limbScale * 0.85, limbLength * 1.3, limbScale * 0.85);
+        shin.position.y = -limbLength * 0.65;
+        limbGroup.add(shin);
+
+        // Foot
+        const foot = new THREE.Mesh(SharedGeometries.foot, limbMat);
+        foot.position.y = -limbLength * 0.9;
+        foot.scale.set(limbScale * 1.3, limbScale * 0.5, limbScale * 1.5);
+        limbGroup.add(foot);
+
+        // Position legs on lower sides of body
+        const attachX = side * 0.95;
+        const attachY = -0.3;
+        const len = Math.sqrt(attachX*attachX + attachY*attachY + zOffset*zOffset);
+        limbGroup.position.set(attachX / len, attachY / len, zOffset / len);
+        limbGroup.rotation.z = side * 0.6;
+        limbGroup.rotation.x = 0.25;
+      }
+
+      limbGroup.userData.side = side;
+      limbGroup.userData.pairIndex = pairIndex;
+      limbGroup.userData.limbType = limbType;
+      limbGroup.userData.initialRotation = limbGroup.rotation.clone();
+
+      this.limbsGroup.add(limbGroup);
     }
   }
 
@@ -218,80 +391,318 @@ class CreatureRenderer {
   buildJaws(data) {
     if (data.jaws < 0.2) return;
 
-    const jawMat = new THREE.MeshStandardMaterial({ color: 0xaa2222 });
-    const toothMat = new THREE.MeshStandardMaterial({ color: 0xffffee });
+    const jawValue = data.jaws;  // Controls SIZE
+    const jawVariativeness = data.jawsVariativeness || 0.5;  // Controls TYPE
 
-    // Increased jaw scale for better visibility
-    const jawScale = 1.2 + data.jaws * 1.0; // Was 0.8 + 0.6, now 1.2 + 1.0
+    // TYPE based on diet specialization first, then gene VARIATIVENESS
+    // Priority: parasitic > scavenging > variativeness-based
+    // Parasitic: PROBOSCIS - needle/tube for fluid extraction
+    // Scavenger: CARRION - robust bone-crushing/tearing jaws
+    // Low variativeness (0-0.33): FILTER/GRAZER - baleen-like
+    // Medium variativeness (0.33-0.66): MANDIBLES - general pincers
+    // High variativeness (0.66-1.0): FANGS - apex predator teeth
+    let jawType;
+    if (data.parasitic > 0.35) {
+      jawType = 'proboscis';
+    } else if (data.scavenging > 0.4) {
+      jawType = 'carrion';
+    } else if (jawVariativeness < 0.33) {
+      jawType = 'filter';
+    } else if (jawVariativeness < 0.66) {
+      jawType = 'mandible';
+    } else {
+      jawType = 'fangs';
+    }
 
-    // Upper jaw - positioned more forward and visible
-    const upperJaw = new THREE.Mesh(SharedGeometries.jaw, jawMat);
-    upperJaw.position.set(0, 0.1, 1.1); // Moved up and forward
-    upperJaw.scale.setScalar(jawScale);
-    upperJaw.userData.restY = 0.1;
-    this.jawsGroup.add(upperJaw);
+    const jawScale = 0.6 + jawValue * 0.8;
+    this.jawsGroup.userData.jawType = jawType;
 
-    // Lower jaw
-    const lowerJaw = new THREE.Mesh(SharedGeometries.jaw, jawMat);
-    lowerJaw.position.set(0, -0.1, 1.1); // Moved down and forward
-    lowerJaw.scale.setScalar(jawScale);
-    lowerJaw.userData.restY = -0.1;
-    this.jawsGroup.add(lowerJaw);
+    if (jawType === 'filter') {
+      // === FILTER/GRAZER MOUTH ===
+      // Wide, flat mouth with baleen-like structures or grinding plates
+      const mouthMat = new THREE.MeshStandardMaterial({
+        color: 0x554433,
+        roughness: 0.6
+      });
 
-    // Teeth for predators with strong jaws
-    if (data.jaws > 0.4 && data.predatory > 0.3) {
-      const teethCount = Math.floor(2 + data.jaws * 3);
-      for (let i = 0; i < teethCount; i++) {
-        const xPos = (i - (teethCount - 1) / 2) * 0.08;
+      // Wide mouth opening
+      const mouthGeo = new THREE.TorusGeometry(0.15 * jawScale, 0.04 * jawScale, 8, 12, Math.PI);
+      const mouth = new THREE.Mesh(mouthGeo, mouthMat);
+      mouth.position.set(0, -0.15, 0.95);
+      mouth.rotation.x = Math.PI / 2;
+      mouth.rotation.z = Math.PI;
+      this.jawsGroup.add(mouth);
 
-        // Upper teeth (point down)
-        const upperTooth = new THREE.Mesh(SharedGeometries.tooth, toothMat);
-        upperTooth.position.set(xPos, 0, 1.05);
-        upperTooth.rotation.x = Math.PI;
-        upperTooth.scale.setScalar(jawScale * 0.8);
-        this.jawsGroup.add(upperTooth);
+      // Baleen/filter plates or grinding ridges
+      const plateMat = new THREE.MeshStandardMaterial({
+        color: 0x776655,
+        roughness: 0.8
+      });
 
-        // Lower teeth (point up)
-        const lowerTooth = new THREE.Mesh(SharedGeometries.tooth, toothMat);
-        lowerTooth.position.set(xPos, -0.1, 1.05);
-        lowerTooth.scale.setScalar(jawScale * 0.8);
-        this.jawsGroup.add(lowerTooth);
+      const plateCount = Math.floor(4 + jawValue * 6);
+      for (let i = 0; i < plateCount; i++) {
+        const plateGeo = new THREE.BoxGeometry(0.02, 0.08 * jawScale, 0.01);
+        const plate = new THREE.Mesh(plateGeo, plateMat);
+        const angle = (i / plateCount - 0.5) * Math.PI * 0.8;
+        plate.position.set(
+          Math.sin(angle) * 0.12 * jawScale,
+          -0.2,
+          0.95 + Math.cos(angle) * 0.05
+        );
+        plate.rotation.z = angle * 0.3;
+        plate.userData.plateIndex = i;
+        this.jawsGroup.add(plate);
       }
+
+      // Store for animation
+      this.jawsGroup.userData.isFilter = true;
+
+    } else if (jawType === 'fangs') {
+      // === FANGS/TEETH ===
+      // Sharp predatory teeth in an open jaw
+      const jawBoneMat = new THREE.MeshStandardMaterial({
+        color: 0x443322,
+        roughness: 0.5
+      });
+      const toothMat = new THREE.MeshStandardMaterial({
+        color: 0xeeeedd,
+        roughness: 0.3
+      });
+
+      // Upper jaw
+      const upperJawGeo = new THREE.BoxGeometry(0.25 * jawScale, 0.06 * jawScale, 0.15 * jawScale);
+      const upperJaw = new THREE.Mesh(upperJawGeo, jawBoneMat);
+      upperJaw.position.set(0, 0.05, 0.95);
+      upperJaw.userData.isUpperJaw = true;
+      upperJaw.userData.baseY = 0.05;
+      this.jawsGroup.add(upperJaw);
+
+      // Lower jaw
+      const lowerJawGeo = new THREE.BoxGeometry(0.22 * jawScale, 0.05 * jawScale, 0.14 * jawScale);
+      const lowerJaw = new THREE.Mesh(lowerJawGeo, jawBoneMat);
+      lowerJaw.position.set(0, -0.12, 0.93);
+      lowerJaw.userData.isLowerJaw = true;
+      lowerJaw.userData.baseY = -0.12;
+      lowerJaw.userData.baseRotX = 0;
+      this.jawsGroup.add(lowerJaw);
+
+      // Add teeth to upper jaw
+      const upperToothCount = Math.floor(3 + jawValue * 4);
+      for (let i = 0; i < upperToothCount; i++) {
+        const tooth = new THREE.Mesh(SharedGeometries.tooth, toothMat);
+        const t = (i / (upperToothCount - 1)) - 0.5;
+        tooth.position.set(t * 0.2 * jawScale, -0.04 * jawScale, 0.05 * jawScale);
+        tooth.rotation.x = Math.PI;
+        tooth.scale.setScalar(0.8 + jawValue * 0.4);
+        // Larger fangs at front
+        if (Math.abs(t) < 0.2) tooth.scale.y *= 1.5;
+        upperJaw.add(tooth);
+      }
+
+      // Add teeth to lower jaw
+      const lowerToothCount = Math.floor(2 + jawValue * 3);
+      for (let i = 0; i < lowerToothCount; i++) {
+        const tooth = new THREE.Mesh(SharedGeometries.tooth, toothMat);
+        const t = (i / (lowerToothCount - 1)) - 0.5;
+        tooth.position.set(t * 0.18 * jawScale, 0.03 * jawScale, 0.04 * jawScale);
+        tooth.scale.setScalar(0.6 + jawValue * 0.3);
+        lowerJaw.add(tooth);
+      }
+
+      // Store for animation
+      this.jawsGroup.userData.upperJaw = upperJaw;
+      this.jawsGroup.userData.lowerJaw = lowerJaw;
+      this.jawsGroup.userData.isFangs = true;
+
+    } else if (jawType === 'proboscis') {
+      // === PROBOSCIS (Parasitic) ===
+      // Long needle-like tube for piercing and extracting fluids
+      const proboscisMat = new THREE.MeshStandardMaterial({
+        color: 0x662266, // Purple tint for parasites
+        roughness: 0.3,
+        metalness: 0.2
+      });
+
+      // Main proboscis tube - long and needle-like
+      const tubeLength = 0.4 + jawValue * 0.4;
+      const tubeGeo = new THREE.CylinderGeometry(0.015, 0.04, tubeLength, 8);
+      const tube = new THREE.Mesh(tubeGeo, proboscisMat);
+      tube.position.set(0, -0.1, 0.9);
+      tube.rotation.x = Math.PI * 0.35;
+      tube.userData.isProboscis = true;
+      tube.userData.baseRotX = tube.rotation.x;
+      tube.userData.baseZ = tube.position.z;
+      this.jawsGroup.add(tube);
+
+      // Sheath/housing at base
+      const sheathMat = new THREE.MeshStandardMaterial({
+        color: 0x553355,
+        roughness: 0.5
+      });
+      const sheathGeo = new THREE.CylinderGeometry(0.06, 0.04, 0.12, 8);
+      const sheath = new THREE.Mesh(sheathGeo, sheathMat);
+      sheath.position.set(0, -0.05, 0.85);
+      sheath.rotation.x = Math.PI * 0.3;
+      this.jawsGroup.add(sheath);
+
+      // Tiny barbs/hooks near tip for grip
+      const barbMat = new THREE.MeshStandardMaterial({ color: 0x441144 });
+      for (let i = 0; i < 3; i++) {
+        const barbGeo = new THREE.ConeGeometry(0.01, 0.04, 4);
+        const barb = new THREE.Mesh(barbGeo, barbMat);
+        const angle = (i / 3) * Math.PI * 2;
+        barb.position.set(
+          Math.cos(angle) * 0.02,
+          -tubeLength * 0.4,
+          Math.sin(angle) * 0.02
+        );
+        barb.rotation.x = Math.PI * 0.7;
+        barb.rotation.z = angle;
+        tube.add(barb);
+      }
+
+      // Store for animation
+      this.jawsGroup.userData.proboscis = tube;
+      this.jawsGroup.userData.isProboscis = true;
+
+    } else if (jawType === 'carrion') {
+      // === CARRION JAWS (Scavenger) ===
+      // Robust, powerful jaws for tearing rotted flesh and crushing bones
+      const jawBoneMat = new THREE.MeshStandardMaterial({
+        color: 0x553311, // Dark brown
+        roughness: 0.6,
+        metalness: 0.1
+      });
+      const toothMat = new THREE.MeshStandardMaterial({
+        color: 0xccbb99, // Yellowed, worn teeth
+        roughness: 0.5
+      });
+
+      // Heavy upper jaw - wider and more robust than fangs
+      const upperJawGeo = new THREE.BoxGeometry(0.3 * jawScale, 0.08 * jawScale, 0.18 * jawScale);
+      const upperJaw = new THREE.Mesh(upperJawGeo, jawBoneMat);
+      upperJaw.position.set(0, 0.03, 0.92);
+      upperJaw.userData.isUpperJaw = true;
+      upperJaw.userData.baseY = 0.03;
+      this.jawsGroup.add(upperJaw);
+
+      // Powerful lower jaw - heavier, for bone crushing
+      const lowerJawGeo = new THREE.BoxGeometry(0.28 * jawScale, 0.1 * jawScale, 0.16 * jawScale);
+      const lowerJaw = new THREE.Mesh(lowerJawGeo, jawBoneMat);
+      lowerJaw.position.set(0, -0.15, 0.9);
+      lowerJaw.userData.isLowerJaw = true;
+      lowerJaw.userData.baseY = -0.15;
+      lowerJaw.userData.baseRotX = 0;
+      this.jawsGroup.add(lowerJaw);
+
+      // Add worn, blunt crushing teeth to upper jaw
+      const upperToothCount = Math.floor(4 + jawValue * 3);
+      for (let i = 0; i < upperToothCount; i++) {
+        // Mix of blunt molars and worn fangs
+        const isBlunt = i % 2 === 0;
+        let toothGeo;
+        if (isBlunt) {
+          toothGeo = new THREE.BoxGeometry(0.035, 0.04 * jawScale, 0.03);
+        } else {
+          toothGeo = new THREE.ConeGeometry(0.02, 0.05 * jawScale, 4);
+        }
+        const toothMesh = new THREE.Mesh(toothGeo, toothMat);
+        const t = (i / (upperToothCount - 1)) - 0.5;
+        toothMesh.position.set(t * 0.24 * jawScale, -0.05 * jawScale, 0.06 * jawScale);
+        if (!isBlunt) toothMesh.rotation.x = Math.PI;
+        upperJaw.add(toothMesh);
+      }
+
+      // Add crushing teeth to lower jaw
+      const lowerToothCount = Math.floor(3 + jawValue * 3);
+      for (let i = 0; i < lowerToothCount; i++) {
+        const isBlunt = i % 2 === 1;
+        let toothGeo;
+        if (isBlunt) {
+          toothGeo = new THREE.BoxGeometry(0.04, 0.035 * jawScale, 0.035);
+        } else {
+          toothGeo = new THREE.ConeGeometry(0.018, 0.04 * jawScale, 4);
+        }
+        const toothMesh = new THREE.Mesh(toothGeo, toothMat);
+        const t = (i / (lowerToothCount - 1)) - 0.5;
+        toothMesh.position.set(t * 0.22 * jawScale, 0.055 * jawScale, 0.05 * jawScale);
+        lowerJaw.add(toothMesh);
+      }
+
+      // Store for animation
+      this.jawsGroup.userData.upperJaw = upperJaw;
+      this.jawsGroup.userData.lowerJaw = lowerJaw;
+      this.jawsGroup.userData.isCarrion = true;
+
+    } else {
+      // === MANDIBLES (default) ===
+      // Insect-like pincers
+      const mandibleMat = new THREE.MeshStandardMaterial({
+        color: 0x3a2a1a,
+        roughness: 0.4,
+        metalness: 0.2
+      });
+
+      [-1, 1].forEach((side) => {
+        const mandible = new THREE.Mesh(SharedGeometries.mandible, mandibleMat);
+        mandible.position.set(side * 0.15, -0.25, 1.0);
+        mandible.rotation.x = Math.PI * 0.4;
+        mandible.rotation.z = -side * 0.3;
+        mandible.scale.set(jawScale, jawScale * 1.2, jawScale);
+
+        mandible.userData.side = side;
+        mandible.userData.baseRotationZ = mandible.rotation.z;
+
+        this.jawsGroup.add(mandible);
+
+        // Add serrated teeth for strong jaws
+        if (jawValue > 0.4) {
+          const toothCount = Math.floor(2 + jawValue * 2);
+          const toothMat = new THREE.MeshStandardMaterial({ color: 0x2a1a0a });
+
+          for (let i = 0; i < toothCount; i++) {
+            const tooth = new THREE.Mesh(SharedGeometries.tooth, toothMat);
+            const t = (i / toothCount) - 0.2;
+            tooth.position.set(side * 0.03, t * 0.15, 0);
+            tooth.rotation.z = -side * Math.PI * 0.4;
+            tooth.scale.setScalar(0.6);
+            mandible.add(tooth);
+          }
+        }
+      });
+
+      // Store references for animation
+      this.jawsGroup.userData.left = this.jawsGroup.children[0];
+      this.jawsGroup.userData.right = this.jawsGroup.children[1];
+      this.jawsGroup.userData.isMandible = true;
     }
   }
 
   buildArmor(data) {
     if (data.armor < 0.3) return;
 
-    const spikeMat = new THREE.MeshStandardMaterial({
-      color: 0x666666, // Darker gray for better visibility
-      metalness: 0.6,
-      roughness: 0.4
+    // Segmented armor plates along the back (like an armadillo or trilobite)
+    const plateMat = new THREE.MeshStandardMaterial({
+      color: 0x3d2817, // Dark brown
+      roughness: 0.4,
+      metalness: 0.15
     });
 
-    // More spikes for better shell coverage
-    const spikeCount = Math.floor(6 + data.armor * 12); // Increased from 3-9 to 6-18
+    const plateCount = 3 + Math.floor(data.armor * 3); // 3-6 plates based on armor
+    const plateSize = 0.25 + data.armor * 0.1;
 
-    // Distribute spikes evenly on upper body for shell-like appearance
-    for (let i = 0; i < spikeCount; i++) {
-      const spike = new THREE.Mesh(SharedGeometries.spike, spikeMat);
+    for (let i = 0; i < plateCount; i++) {
+      // Position plates along the dorsal (top-back) line
+      const t = (i / (plateCount - 1)) - 0.5; // -0.5 to 0.5
+      const zPos = t * 0.8; // Spread along body length
 
-      // Place on upper hemisphere in a more organized pattern
-      const theta = (i / spikeCount) * Math.PI * 2;
-      const row = Math.floor(i / 6); // Create rows
-      const phi = 0.2 + (row * 0.3); // Vertical distribution
-
-      spike.position.set(
-        Math.sin(phi) * Math.cos(theta) * 1.0, // Slightly larger radius
-        Math.cos(phi) * 1.0,
-        Math.sin(phi) * Math.sin(theta) * 1.0
-      );
-      
-      // Larger, more visible spikes
-      const spikeScale = 1.2 + data.armor * 1.0; // Increased from 0.8-1.4 to 1.2-2.2
-      spike.scale.setScalar(spikeScale);
-      spike.lookAt(spike.position.clone().multiplyScalar(2));
-      this.armorGroup.add(spike);
+      // Plates are flat discs on the back
+      const plateGeo = new THREE.CylinderGeometry(plateSize, plateSize * 0.9, 0.08, 8);
+      const plate = new THREE.Mesh(plateGeo, plateMat);
+      plate.rotation.x = Math.PI / 2; // Lay flat
+      plate.position.set(0, 0.35, zPos); // On top of body, not covering sides
+      plate.scale.set(1, 1, 0.7); // Slightly elongated
+      this.armorGroup.add(plate);
     }
   }
 
@@ -315,6 +726,250 @@ class CreatureRenderer {
       this.probeMesh.position.set(0, -0.15, 0.7);
       this.probeMesh.rotation.x = Math.PI / 3;
       this.mesh.add(this.probeMesh);
+    }
+
+    // Antennae for smell-based creatures
+    if (data.smell > 0.25) {
+      this.antennaeGroup = new THREE.Group();
+      const antennaLength = 0.3 + data.smell * 0.5;
+      const segments = 3 + Math.floor(data.smell * 3); // 3-6 segments
+
+      const antennaMat = new THREE.MeshStandardMaterial({
+        color: 0x553322,
+        roughness: 0.6
+      });
+
+      [-1, 1].forEach(side => {
+        const antennaGroup = new THREE.Group();
+
+        // Build segmented antenna - segments stack upward from base
+        let yOffset = 0;
+        for (let i = 0; i < segments; i++) {
+          const t = i / segments;
+          const segmentLength = antennaLength / segments;
+          const segmentWidth = 0.03 * (1 - t * 0.5); // Taper toward tip
+
+          const segGeo = new THREE.CylinderGeometry(segmentWidth * 0.7, segmentWidth, segmentLength, 6);
+          const segment = new THREE.Mesh(segGeo, antennaMat);
+          segment.position.y = yOffset + segmentLength / 2;
+          yOffset += segmentLength;
+          segment.userData.segmentIndex = i;
+          antennaGroup.add(segment);
+        }
+
+        // Position on TOP of head, outside the body (body radius ~1)
+        // Place at front-top of head, angled forward and outward
+        const baseX = side * 0.3;
+        const baseY = 0.85; // Top of head
+        const baseZ = 0.5;  // Front of head
+
+        antennaGroup.position.set(baseX, baseY, baseZ);
+        antennaGroup.rotation.z = side * Math.PI / 6;  // Angle outward
+        antennaGroup.rotation.x = -Math.PI / 3;        // Angle forward
+
+        antennaGroup.userData.initialRotation = antennaGroup.rotation.clone();
+        antennaGroup.userData.side = side;
+
+        this.antennaeGroup.add(antennaGroup);
+      });
+
+      this.mesh.add(this.antennaeGroup);
+    }
+  }
+
+  buildEmergentFeatures(data, bodyColor) {
+    const ef = data.emergentFeatures;
+    if (!ef) return;
+
+    const limbColor = bodyColor.clone().multiplyScalar(0.75);
+
+    // === WINGS ===
+    if (ef.wings > 0.1) {
+      const wingSize = 0.3 + ef.wings * 0.8;
+      const wingMat = new THREE.MeshStandardMaterial({
+        color: bodyColor.clone().multiplyScalar(0.9),
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.7 + ef.wings * 0.2,
+        roughness: 0.3
+      });
+
+      // Create wing shape
+      const wingShape = new THREE.Shape();
+      wingShape.moveTo(0, 0);
+      wingShape.quadraticCurveTo(wingSize * 0.6, wingSize * 0.3, wingSize, wingSize * 0.1);
+      wingShape.quadraticCurveTo(wingSize * 0.7, wingSize * 0.5, wingSize * 0.3, wingSize * 0.8);
+      wingShape.quadraticCurveTo(0.1, wingSize * 0.4, 0, 0);
+
+      const wingGeo = new THREE.ShapeGeometry(wingShape);
+
+      [-1, 1].forEach(side => {
+        const wing = new THREE.Mesh(wingGeo, wingMat);
+        wing.position.set(side * 0.3, 0.4, 0.1);
+        wing.rotation.y = side * Math.PI / 2;
+        wing.rotation.x = -0.3;
+        wing.scale.x = side;
+        wing.userData.isWing = true;
+        wing.userData.side = side;
+        wing.userData.baseRotation = wing.rotation.clone();
+        this.emergentGroup.add(wing);
+      });
+    }
+
+    // === BIOLUMINESCENCE ===
+    if (ef.bioluminescence > 0.15) {
+      const glowIntensity = ef.bioluminescence;
+      const glowColor = new THREE.Color().setHSL(
+        0.5 + Math.random() * 0.3, // Cyan to purple
+        0.8,
+        0.5 + glowIntensity * 0.3
+      );
+
+      const glowMat = new THREE.MeshStandardMaterial({
+        color: glowColor,
+        emissive: glowColor,
+        emissiveIntensity: glowIntensity * 2,
+        transparent: true,
+        opacity: 0.8
+      });
+
+      // Add glowing spots on the body surface
+      const spotCount = Math.floor(3 + glowIntensity * 5);
+      for (let i = 0; i < spotCount; i++) {
+        const spotSize = 0.08 + glowIntensity * 0.06;
+        const spotGeo = new THREE.SphereGeometry(spotSize, 8, 8);
+        const spot = new THREE.Mesh(spotGeo, glowMat.clone());
+
+        // Distribute spots on body surface - push out past the body radius
+        const theta = (i / spotCount) * Math.PI * 2 + Math.random() * 0.5;
+        const phi = Math.random() * Math.PI * 0.6 - Math.PI * 0.3;
+        const surfaceRadius = 1.05; // Just outside the body
+        spot.position.set(
+          Math.sin(theta) * Math.cos(phi) * surfaceRadius,
+          Math.sin(phi) * surfaceRadius * 0.9 + 0.1,
+          Math.cos(theta) * Math.cos(phi) * surfaceRadius
+        );
+        // Flatten spots slightly against body
+        spot.scale.set(1, 0.5, 1);
+        spot.lookAt(0, 0, 0); // Face outward
+        spot.userData.glowPhase = Math.random() * Math.PI * 2;
+        this.emergentGroup.add(spot);
+      }
+    }
+
+    // === SPIKES ===
+    if (ef.spikes > 0.1) {
+      const spikeCount = Math.floor(3 + ef.spikes * 8);
+      const spikeSize = 0.15 + ef.spikes * 0.25;
+      const spikeMat = new THREE.MeshStandardMaterial({
+        color: limbColor.clone().multiplyScalar(0.6),
+        roughness: 0.4
+      });
+
+      for (let i = 0; i < spikeCount; i++) {
+        const spike = new THREE.Mesh(SharedGeometries.spike, spikeMat);
+        spike.scale.setScalar(spikeSize);
+
+        // Position on upper body
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.random() * Math.PI * 0.5;
+        const r = 0.95;
+        spike.position.set(
+          Math.sin(theta) * Math.cos(phi) * r,
+          Math.sin(phi) * r + 0.2,
+          Math.cos(theta) * Math.cos(phi) * r
+        );
+
+        // Point outward
+        spike.lookAt(spike.position.clone().multiplyScalar(2));
+        this.emergentGroup.add(spike);
+      }
+    }
+
+    // === TAIL ===
+    if (ef.tail > 0.15) {
+      const tailLength = 2 + ef.tail * 4;
+      const segments = Math.floor(tailLength);
+      const tailMat = new THREE.MeshStandardMaterial({
+        color: limbColor,
+        roughness: 0.6
+      });
+
+      let prevPos = new THREE.Vector3(0, -0.2, -0.9);
+      for (let i = 0; i < segments; i++) {
+        const t = i / segments;
+        const segment = new THREE.Mesh(SharedGeometries.tailSegment, tailMat);
+        const scale = 1 - t * 0.6;
+        segment.scale.setScalar(scale * (0.5 + ef.tail * 0.5));
+
+        segment.position.copy(prevPos);
+        segment.position.z -= 0.15 * scale;
+        segment.userData.tailIndex = i;
+        segment.userData.basePos = segment.position.clone();
+
+        this.emergentGroup.add(segment);
+        prevPos = segment.position.clone();
+      }
+    }
+
+    // === HORN ===
+    if (ef.horn > 0.2) {
+      const hornSize = 0.5 + ef.horn * 1.0;
+      const hornMat = new THREE.MeshStandardMaterial({
+        color: 0x443322,
+        roughness: 0.3,
+        metalness: 0.1
+      });
+
+      const horn = new THREE.Mesh(SharedGeometries.horn, hornMat);
+      horn.scale.setScalar(hornSize);
+      horn.position.set(0, 0.8, 0.3);
+      horn.rotation.x = -0.4;
+      this.emergentGroup.add(horn);
+
+      // Second horn for high values
+      if (ef.horn > 0.6) {
+        [-0.25, 0.25].forEach(xOffset => {
+          const sideHorn = new THREE.Mesh(SharedGeometries.horn, hornMat);
+          sideHorn.scale.setScalar(hornSize * 0.7);
+          sideHorn.position.set(xOffset, 0.6, 0.2);
+          sideHorn.rotation.x = -0.2;
+          sideHorn.rotation.z = -xOffset * 0.5;
+          this.emergentGroup.add(sideHorn);
+        });
+      }
+    }
+
+    // === SHELL (snail-like spiral shell on the back) ===
+    if (ef.shell > 0.2) {
+      const shellMat = new THREE.MeshStandardMaterial({
+        color: 0x886644,
+        roughness: 0.4,
+        metalness: 0.05
+      });
+
+      // Create a spiral shell from overlapping spheres (like a nautilus)
+      const baseSize = 0.2 + ef.shell * 0.3;
+      const spirals = 4 + Math.floor(ef.shell * 3); // 4-7 segments
+
+      for (let i = 0; i < spirals; i++) {
+        const t = i / spirals;
+        const angle = t * Math.PI * 1.5; // Spiral angle
+        const radius = 0.1 + t * 0.25; // Expanding radius
+        const segmentSize = baseSize * (0.5 + t * 0.5); // Growing segments
+
+        const segGeo = new THREE.SphereGeometry(segmentSize, 8, 6);
+        const seg = new THREE.Mesh(segGeo, shellMat);
+
+        // Position in a spiral pattern, offset to the back-right
+        seg.position.set(
+          0.3 + Math.cos(angle) * radius, // Offset to the right side
+          0.2 + t * 0.2, // Rise up slightly
+          -0.3 + Math.sin(angle) * radius // Behind the body
+        );
+        seg.scale.set(1, 0.8, 1); // Slightly flattened
+        this.emergentGroup.add(seg);
+      }
     }
   }
 
@@ -386,101 +1041,162 @@ class CreatureRenderer {
       }
     }
 
-    // === WALKING/PADDLING ANIMATION (limbs) ===
+    // === LIMB ANIMATION (varies by type: fin, leg, claw) ===
     if (this.limbsGroup.children.length > 0 && velLen > 0.01) {
       const limbPhase = this.animTime * animSpeed * 2.5;
 
       this.limbsGroup.children.forEach((child) => {
-        if (child.userData.side !== undefined) {
-          // This is a limb (not a foot)
-          const phase = limbPhase + child.userData.pairIndex * Math.PI + (child.userData.side > 0 ? Math.PI / 2 : 0);
-          
-          // Complex gait: Swing (forward/back) + Lift (up/down)
+        if (child.userData.side === undefined) return;
+
+        const side = child.userData.side;
+        const pairIndex = child.userData.pairIndex || 0;
+        const limbType = child.userData.limbType || 'leg';
+        const phase = limbPhase + pairIndex * Math.PI + (side > 0 ? Math.PI / 2 : 0);
+
+        if (limbType === 'fin') {
+          // FINS: Paddle/rowing motion
+          const paddle = Math.sin(phase) * 0.4 * Math.min(velLen * 3, 1);
+          child.rotation.z = child.userData.initialRotation.z + paddle * side;
+          child.rotation.y = child.userData.initialRotation.y + Math.sin(phase * 0.5) * 0.15;
+
+        } else if (limbType === 'claw') {
+          // CLAWS: Reaching/grabbing motion
+          const reach = Math.sin(phase) * 0.3 * Math.min(velLen * 3, 1);
+          child.rotation.x = (child.userData.initialRotation?.x || 0.2) + reach;
+          child.rotation.z = (child.userData.initialRotation?.z || side * 0.5) - Math.abs(reach) * 0.2 * side;
+
+          // Animate pincers if present (last two children are pincers)
+          if (child.userData.isClaw && child.children.length >= 2) {
+            const pinch = (Math.sin(this.animTime * 4) + 1) * 0.15;
+            const lastIdx = child.children.length - 1;
+            if (child.children[lastIdx - 1]) {
+              child.children[lastIdx - 1].rotation.z = -0.3 - pinch;
+            }
+            if (child.children[lastIdx]) {
+              child.children[lastIdx].rotation.z = 0.3 + pinch;
+            }
+          }
+
+        } else {
+          // LEGS: Walking gait
           const swing = Math.sin(phase) * 0.5 * Math.min(velLen * 3, 1.2);
           const lift = Math.max(0, Math.cos(phase)) * 0.3 * Math.min(velLen * 3, 1);
-          
-          // Apply rotations
-          child.rotation.x = 0.3 + swing; // Forward/back
-          child.rotation.z = child.userData.side * (0.4 - lift * 0.5); // Lift leg slightly
-          
-          // Animate the foot if it exists
-          if (child.userData.isFootOf !== undefined) {
-             // This logic is tricky because feet are separate children in current structure
-             // But looking at buildLimbs, feet are added to limbsGroup too.
-             // We need to find the foot corresponding to this limb.
-             // Actually, the loop iterates over ALL children of limbsGroup.
-          }
-        } else if (child.userData.isFootOf !== undefined) {
-           // This is a foot
-           const limbIndex = child.userData.isFootOf;
-           // We need to know the phase of the parent limb. 
-           // We can reconstruct it if we know the limb's properties, but we don't have easy access here.
-           // However, feet are added immediately after limbs in buildLimbs.
-           // Let's assume a simple phase offset for feet.
-           
-           // Find the limb this foot belongs to (it's at limbIndex in the group?)
-           // In buildLimbs: this.limbsGroup.add(limb); then this.limbsGroup.add(foot);
-           // So foot is at index i, limb is at index i-1? No, isFootOf stores the index.
-           
-           const limb = this.limbsGroup.children[child.userData.isFootOf];
-           if (limb) {
-              const phase = limbPhase + limb.userData.pairIndex * Math.PI + (limb.userData.side > 0 ? Math.PI / 2 : 0);
-              const footFlex = Math.sin(phase - 0.5) * 0.3;
-              child.rotation.x = footFlex;
-              
-              // Sync position with limb tip? 
-              // The limb rotates, but the foot is a separate object in the group.
-              // If we want the foot to stay attached to the limb tip, we should have parented it.
-              // Since they are separate, we must update foot position if we want it to look connected.
-              // But the current buildLimbs sets a static position.
-              // Let's just animate rotation for now to avoid breaking the model.
-           }
+
+          child.rotation.x = (child.userData.initialRotation?.x || 0.25) + swing;
+          child.rotation.z = side * (0.5 - lift * 0.4);
         }
       });
     }
 
-    // === EATING/ATTACKING ANIMATION (jaw chomp) ===
-    if (this.jawsGroup.children.length >= 2) {
-      const upperJaw = this.jawsGroup.children[0];
-      const lowerJaw = this.jawsGroup.children[1];
+    // === JAW ANIMATIONS (type-specific) ===
+    const jawData = this.jawsGroup.userData;
+
+    if (jawData.isMandible && jawData.left && jawData.right) {
+      // MANDIBLES: pincer animation
+      const left = jawData.left;
+      const right = jawData.right;
 
       if (this.isAttacking) {
-        // Aggressive attack animation - fast, wide snap
         const attackSpeed = 40;
         const snap = Math.sin(this.animTime * attackSpeed);
-        const openAmount = (snap + 1) * 0.5; // 0 to 1
-        
-        // Wide open jaws for attack
-        upperJaw.rotation.x = -openAmount * 0.8; // Wider opening
-        lowerJaw.rotation.x = openAmount * 0.8;
-        
-        // Lunge forward during attack
-        const lunge = openAmount * 0.3;
-        upperJaw.position.z = 1.1 + lunge;
-        lowerJaw.position.z = 1.1 + lunge;
-        
+        const openAmount = (snap + 1) * 0.5;
+        left.rotation.z = left.userData.baseRotationZ - openAmount * 0.5;
+        right.rotation.z = right.userData.baseRotationZ + openAmount * 0.5;
       } else if (this.isEating) {
-        // Chomping - Rotational bite for eating
         const chompSpeed = 25;
         const chomp = Math.sin(this.animTime * chompSpeed);
-        const openAmount = (chomp + 1) * 0.5; // 0 to 1
-        
-        // Rotate jaws open/closed
-        upperJaw.rotation.x = -openAmount * 0.4;
-        lowerJaw.rotation.x = openAmount * 0.4;
-        
-        // Slight position shake
-        upperJaw.position.y = upperJaw.userData.restY + Math.random() * 0.02;
+        const openAmount = (chomp + 1) * 0.5;
+        left.rotation.z = left.userData.baseRotationZ - openAmount * 0.3;
+        right.rotation.z = right.userData.baseRotationZ + openAmount * 0.3;
       } else {
-        // Return to rest smoothly
-        upperJaw.rotation.x *= 0.8;
-        lowerJaw.rotation.x *= 0.8;
-        
-        upperJaw.position.y += (upperJaw.userData.restY - upperJaw.position.y) * 0.2;
-        lowerJaw.position.y += (lowerJaw.userData.restY - lowerJaw.position.y) * 0.2;
-        upperJaw.position.z += (1.1 - upperJaw.position.z) * 0.2;
-        lowerJaw.position.z += (1.1 - lowerJaw.position.z) * 0.2;
+        const idle = Math.sin(this.animTime * 2) * 0.1;
+        left.rotation.z = left.userData.baseRotationZ - idle;
+        right.rotation.z = right.userData.baseRotationZ + idle;
       }
+
+    } else if ((jawData.isFangs || jawData.isCarrion) && jawData.upperJaw && jawData.lowerJaw) {
+      // FANGS & CARRION: opening/closing jaw animation
+      const upper = jawData.upperJaw;
+      const lower = jawData.lowerJaw;
+      const isCarrion = jawData.isCarrion;
+
+      if (this.isAttacking) {
+        // Wide snap attack
+        const attackSpeed = isCarrion ? 30 : 40; // Carrion is slower but more powerful
+        const snap = Math.sin(this.animTime * attackSpeed);
+        const openAmount = (snap + 1) * 0.5;
+        const openAngle = isCarrion ? 0.4 : 0.3; // Carrion opens wider
+        upper.position.y = upper.userData.baseY + openAmount * 0.05;
+        lower.position.y = lower.userData.baseY - openAmount * 0.08;
+        lower.rotation.x = lower.userData.baseRotX - openAmount * openAngle;
+      } else if (this.isEating) {
+        // Chewing/tearing motion
+        const chompSpeed = isCarrion ? 15 : 25; // Carrion has slower, grinding motion
+        const chomp = Math.sin(this.animTime * chompSpeed);
+        const openAmount = (chomp + 1) * 0.5;
+        upper.position.y = upper.userData.baseY + openAmount * 0.03;
+        lower.position.y = lower.userData.baseY - openAmount * 0.05;
+        lower.rotation.x = lower.userData.baseRotX - openAmount * 0.2;
+        // Carrion adds side-to-side grinding
+        if (isCarrion) {
+          lower.rotation.y = Math.sin(this.animTime * 8) * 0.1;
+        }
+      } else {
+        // Idle slight movement
+        const idle = Math.sin(this.animTime * 1.5) * 0.02;
+        upper.position.y = upper.userData.baseY + idle;
+        lower.position.y = lower.userData.baseY - idle;
+        lower.rotation.x = lower.userData.baseRotX;
+        if (isCarrion) lower.rotation.y = 0;
+      }
+
+    } else if (jawData.isProboscis && jawData.proboscis) {
+      // PROBOSCIS: extending/retracting needle animation
+      const prob = jawData.proboscis;
+
+      if (this.isAttacking || this.isEating) {
+        // Extend and probe - forward thrusting motion
+        const probeSpeed = this.isAttacking ? 20 : 12;
+        const thrust = Math.sin(this.animTime * probeSpeed);
+        const extend = (thrust + 1) * 0.5;
+
+        // Extend forward
+        prob.position.z = prob.userData.baseZ + extend * 0.15;
+        // Slight searching motion
+        prob.rotation.x = prob.userData.baseRotX + Math.sin(this.animTime * 8) * 0.1;
+        prob.rotation.y = Math.sin(this.animTime * 6) * 0.15;
+        // Pulsing effect (fluid extraction)
+        if (this.isEating) {
+          const pulse = 1 + Math.sin(this.animTime * 15) * 0.1;
+          prob.scale.x = pulse;
+          prob.scale.z = pulse;
+        }
+      } else {
+        // Idle - slight twitch
+        prob.position.z = prob.userData.baseZ;
+        prob.rotation.x = prob.userData.baseRotX + Math.sin(this.animTime * 2) * 0.05;
+        prob.rotation.y = Math.sin(this.animTime * 1.5) * 0.05;
+        prob.scale.x = 1;
+        prob.scale.z = 1;
+      }
+
+    } else if (jawData.isFilter) {
+      // FILTER: rippling plate movement for filter feeding
+      this.jawsGroup.children.forEach(child => {
+        if (child.userData.plateIndex !== undefined) {
+          const platePhase = child.userData.plateIndex * 0.5;
+          if (this.isEating) {
+            // Rhythmic undulation for filter feeding
+            const wave = Math.sin(this.animTime * 8 + platePhase) * 0.15;
+            child.rotation.x = wave;
+            child.position.y = -0.2 + Math.sin(this.animTime * 6 + platePhase) * 0.02;
+          } else {
+            // Gentle idle wave
+            const wave = Math.sin(this.animTime * 2 + platePhase) * 0.05;
+            child.rotation.x = wave;
+          }
+        }
+      });
     }
 
     // === IDLE ANIMATIONS ===
@@ -506,6 +1222,47 @@ class CreatureRenderer {
     if (this.probeMesh && data.parasitic > 0.3) {
       this.probeMesh.rotation.x = Math.PI / 3 + Math.sin(this.animTime * 2) * 0.15;
       this.probeMesh.position.z = 0.7 + Math.sin(this.animTime * 1.5) * 0.05;
+    }
+
+    // Antennae twitching animation
+    if (this.antennaeGroup && this.antennaeGroup.children.length > 0) {
+      this.antennaeGroup.children.forEach(ant => {
+        if (ant.userData.initialRotation) {
+          const side = ant.userData.side || 1;
+          const twitch = Math.sin(this.animTime * 5 + side * 2) * 0.15;
+          const sway = Math.sin(this.animTime * 2) * 0.1;
+
+          ant.rotation.z = ant.userData.initialRotation.z + twitch * side;
+          ant.rotation.x = ant.userData.initialRotation.x + sway;
+        }
+      });
+    }
+
+    // === EMERGENT FEATURE ANIMATIONS ===
+    if (this.emergentGroup.children.length > 0) {
+      this.emergentGroup.children.forEach(child => {
+        // Wing flapping
+        if (child.userData.isWing) {
+          const side = child.userData.side;
+          const flapSpeed = velLen > 0.1 ? 12 : 3; // Fast when moving, slow idle
+          const flapAmount = velLen > 0.1 ? 0.4 : 0.15;
+          const flap = Math.sin(this.animTime * flapSpeed) * flapAmount;
+          child.rotation.z = flap * side;
+        }
+
+        // Bioluminescence pulsing
+        if (child.userData.glowPhase !== undefined && child.material) {
+          const pulse = 0.5 + Math.sin(this.animTime * 2 + child.userData.glowPhase) * 0.5;
+          child.material.emissiveIntensity = pulse * 2;
+        }
+
+        // Tail swaying
+        if (child.userData.tailIndex !== undefined && child.userData.basePos) {
+          const idx = child.userData.tailIndex;
+          const sway = Math.sin(this.animTime * 3 + idx * 0.5) * 0.1 * (idx + 1);
+          child.position.x = child.userData.basePos.x + sway;
+        }
+      });
     }
   }
 
