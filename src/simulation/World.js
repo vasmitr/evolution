@@ -1441,96 +1441,295 @@ class CreatureRenderer {
   }
 }
 
-// Rendering-only plant
-class PlantRenderer {
-  constructor(data) {
-    this.id = data.id;
-    this.data = data;
-    this.age = 0;
+// Instanced plant renderer - handles all plants with just 2 draw calls
+class InstancedPlantRenderer {
+  constructor(scene, maxPlants = 6000) {
+    this.scene = scene;
+    this.maxPlants = maxPlants;
+    this.plantData = new Map(); // id -> { index, isWater, age }
+    this.waterIndices = []; // Available indices for water plants
+    this.landIndices = []; // Available indices for land plants
+    this.time = 0;
 
+    // Shared geometry for all plants
     const geometry = new THREE.TetrahedronGeometry(0.5);
-    // Water plants are brighter/bioluminescent, land plants are normal green
-    const isWater = !data.isOnLand;
-    const material = new THREE.MeshStandardMaterial({
-      color: isWater ? 0x00ffaa : 0x00ff00,  // Cyan-green for water, pure green for land
-      emissive: isWater ? 0x00aa66 : 0x004400,  // Brighter glow underwater
-      emissiveIntensity: isWater ? 0.5 : 0.2
+
+    // Water plants - cyan-green, brighter glow
+    const waterMaterial = new THREE.MeshStandardMaterial({
+      color: 0x00ffaa,
+      emissive: 0x00aa66,
+      emissiveIntensity: 0.5
     });
 
-    this.mesh = new THREE.Mesh(geometry, material);
-    this.mesh.position.set(data.position.x, data.position.y, data.position.z);
-    this.mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
-    this.isWater = isWater;
+    // Land plants - pure green, dimmer
+    const landMaterial = new THREE.MeshStandardMaterial({
+      color: 0x00ff00,
+      emissive: 0x004400,
+      emissiveIntensity: 0.2
+    });
+
+    // Create instanced meshes - 70% water, 30% land estimate
+    const waterCount = Math.floor(maxPlants * 0.7);
+    const landCount = maxPlants - waterCount;
+
+    this.waterMesh = new THREE.InstancedMesh(geometry, waterMaterial, waterCount);
+    this.landMesh = new THREE.InstancedMesh(geometry, landMaterial, landCount);
+
+    // Initialize with zero scale (invisible)
+    const zeroMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (let i = 0; i < waterCount; i++) {
+      this.waterMesh.setMatrixAt(i, zeroMatrix);
+      this.waterIndices.push(i);
+    }
+    for (let i = 0; i < landCount; i++) {
+      this.landMesh.setMatrixAt(i, zeroMatrix);
+      this.landIndices.push(i);
+    }
+
+    this.waterMesh.instanceMatrix.needsUpdate = true;
+    this.landMesh.instanceMatrix.needsUpdate = true;
+
+    // Enable frustum culling
+    this.waterMesh.frustumCulled = true;
+    this.landMesh.frustumCulled = true;
+
+    scene.add(this.waterMesh);
+    scene.add(this.landMesh);
+
+    // Reusable objects for matrix calculations
+    this._matrix = new THREE.Matrix4();
+    this._position = new THREE.Vector3();
+    this._quaternion = new THREE.Quaternion();
+    this._scale = new THREE.Vector3();
   }
 
-  updateFromData(data, dt) {
-    this.data = data;
-    this.age += dt;
+  addPlant(data) {
+    const isWater = !data.isOnLand;
+    const indices = isWater ? this.waterIndices : this.landIndices;
 
-    this.mesh.position.set(data.position.x, data.position.y, data.position.z);
-
-    // Scale based on energy (plants grow as they photosynthesize)
-    const energyScale = 0.5 + (data.energy / 80) * 0.5;
-    // Pulse effect
-    const pulse = 1 + Math.sin(this.age * 2) * 0.1;
-    this.mesh.scale.setScalar(energyScale * pulse);
-
-    // Color intensity based on energy - water plants glow more
-    const intensity = 0.3 + (data.energy / 80) * 0.7;
-    if (this.isWater) {
-      this.mesh.material.emissive.setRGB(0, intensity * 0.5, intensity * 0.3);
-    } else {
-      this.mesh.material.emissive.setRGB(0, intensity * 0.3, 0);
+    if (indices.length === 0) {
+      // No available slots - could expand or skip
+      return false;
     }
+
+    const index = indices.pop();
+    const mesh = isWater ? this.waterMesh : this.landMesh;
+
+    // Store plant data
+    this.plantData.set(data.id, {
+      index,
+      isWater,
+      age: 0,
+      rotation: new THREE.Euler(
+        Math.random() * Math.PI,
+        Math.random() * Math.PI,
+        Math.random() * Math.PI
+      )
+    });
+
+    // Set initial transform
+    this.updatePlantMatrix(data, mesh, index, 0);
+
+    return true;
+  }
+
+  updatePlant(data, dt) {
+    const plantInfo = this.plantData.get(data.id);
+    if (!plantInfo) {
+      // New plant - add it
+      return this.addPlant(data);
+    }
+
+    plantInfo.age += dt;
+    const mesh = plantInfo.isWater ? this.waterMesh : this.landMesh;
+    this.updatePlantMatrix(data, mesh, plantInfo.index, plantInfo.age);
+
+    return true;
+  }
+
+  updatePlantMatrix(data, mesh, index, age) {
+    // Calculate scale based on energy + pulse
+    const energyScale = 0.5 + (data.energy / 80) * 0.5;
+    const pulse = 1 + Math.sin(age * 2) * 0.1;
+    const scale = energyScale * pulse;
+
+    const plantInfo = this.plantData.get(data.id);
+
+    this._position.set(data.position.x, data.position.y, data.position.z);
+    this._quaternion.setFromEuler(plantInfo.rotation);
+    this._scale.set(scale, scale, scale);
+
+    this._matrix.compose(this._position, this._quaternion, this._scale);
+    mesh.setMatrixAt(index, this._matrix);
+  }
+
+  removePlant(id) {
+    const plantInfo = this.plantData.get(id);
+    if (!plantInfo) return;
+
+    const mesh = plantInfo.isWater ? this.waterMesh : this.landMesh;
+    const indices = plantInfo.isWater ? this.waterIndices : this.landIndices;
+
+    // Set to zero scale (invisible)
+    this._matrix.makeScale(0, 0, 0);
+    mesh.setMatrixAt(plantInfo.index, this._matrix);
+
+    // Return index to pool
+    indices.push(plantInfo.index);
+    this.plantData.delete(id);
+  }
+
+  finishUpdate() {
+    // Mark matrices as needing update
+    this.waterMesh.instanceMatrix.needsUpdate = true;
+    this.landMesh.instanceMatrix.needsUpdate = true;
+  }
+
+  getPlantCount() {
+    return this.plantData.size;
   }
 
   dispose() {
-    if (this.mesh.geometry) this.mesh.geometry.dispose();
-    if (this.mesh.material) this.mesh.material.dispose();
+    this.scene.remove(this.waterMesh);
+    this.scene.remove(this.landMesh);
+    this.waterMesh.geometry.dispose();
+    this.waterMesh.material.dispose();
+    this.landMesh.geometry.dispose();
+    this.landMesh.material.dispose();
   }
 }
 
-// Rendering-only corpse
-class CorpseRenderer {
-  constructor(data) {
-    this.id = data.id;
-    this.data = data;
-    this.initialEnergy = data.energy || 100;
+// Instanced corpse renderer - handles all corpses with 2 draw calls (normal + toxic)
+class InstancedCorpseRenderer {
+  constructor(scene, maxCorpses = 500) {
+    this.scene = scene;
+    this.maxCorpses = maxCorpses;
+    this.corpseData = new Map(); // id -> { index, isToxic, baseScale, initialEnergy }
+    this.normalIndices = [];
+    this.toxicIndices = [];
 
-    // Corpses are darker, decaying versions of creatures
-    // Use unit sphere, scale based on creature size
+    // Shared geometry
     const geometry = new THREE.SphereGeometry(1, 8, 8);
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x4a3728,  // Brown/decaying color
+
+    // Normal corpse material - brown/decaying
+    const normalMaterial = new THREE.MeshStandardMaterial({
+      color: 0x4a3728,
       roughness: 0.9,
       metalness: 0.0
     });
 
-    this.mesh = new THREE.Mesh(geometry, material);
-    this.mesh.position.set(data.position.x, data.position.y, data.position.z);
+    // Toxic corpse material - purple tint
+    const toxicMaterial = new THREE.MeshStandardMaterial({
+      color: 0x6b3a6b,
+      roughness: 0.9,
+      metalness: 0.0
+    });
 
-    // Base scale from creature size (capped to reasonable range)
-    this.baseScale = Math.min(2, 0.5 + (data.size || 0) * 1.5);
-    this.mesh.scale.setScalar(this.baseScale);
+    // 80% normal, 20% toxic estimate
+    const normalCount = Math.floor(maxCorpses * 0.8);
+    const toxicCount = maxCorpses - normalCount;
 
-    // Toxic corpses have a purple tint
-    if (data.toxicity > 0.3) {
-      material.color.setHex(0x6b3a6b);
+    this.normalMesh = new THREE.InstancedMesh(geometry, normalMaterial, normalCount);
+    this.toxicMesh = new THREE.InstancedMesh(geometry, toxicMaterial, toxicCount);
+
+    // Initialize with zero scale
+    const zeroMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (let i = 0; i < normalCount; i++) {
+      this.normalMesh.setMatrixAt(i, zeroMatrix);
+      this.normalIndices.push(i);
     }
+    for (let i = 0; i < toxicCount; i++) {
+      this.toxicMesh.setMatrixAt(i, zeroMatrix);
+      this.toxicIndices.push(i);
+    }
+
+    this.normalMesh.instanceMatrix.needsUpdate = true;
+    this.toxicMesh.instanceMatrix.needsUpdate = true;
+
+    scene.add(this.normalMesh);
+    scene.add(this.toxicMesh);
+
+    // Reusable objects
+    this._matrix = new THREE.Matrix4();
+    this._position = new THREE.Vector3();
+    this._quaternion = new THREE.Quaternion();
+    this._scale = new THREE.Vector3();
   }
 
-  updateFromData(data) {
-    this.data = data;
-    this.mesh.position.set(data.position.x, data.position.y, data.position.z);
+  addCorpse(data) {
+    const isToxic = data.toxicity > 0.3;
+    const indices = isToxic ? this.toxicIndices : this.normalIndices;
 
-    // Shrink as energy is consumed/decays (relative to initial energy, capped)
-    const energyRatio = Math.min(1, Math.max(0.2, data.energy / this.initialEnergy));
-    this.mesh.scale.setScalar(this.baseScale * energyRatio);
+    if (indices.length === 0) return false;
+
+    const index = indices.pop();
+    const baseScale = Math.min(2, 0.5 + (data.size || 0) * 1.5);
+
+    this.corpseData.set(data.id, {
+      index,
+      isToxic,
+      baseScale,
+      initialEnergy: data.energy || 100
+    });
+
+    this.updateCorpseMatrix(data);
+    return true;
+  }
+
+  updateCorpse(data) {
+    const corpseInfo = this.corpseData.get(data.id);
+    if (!corpseInfo) {
+      return this.addCorpse(data);
+    }
+
+    this.updateCorpseMatrix(data);
+    return true;
+  }
+
+  updateCorpseMatrix(data) {
+    const corpseInfo = this.corpseData.get(data.id);
+    if (!corpseInfo) return;
+
+    const mesh = corpseInfo.isToxic ? this.toxicMesh : this.normalMesh;
+
+    // Shrink as energy decays
+    const energyRatio = Math.min(1, Math.max(0.2, data.energy / corpseInfo.initialEnergy));
+    const scale = corpseInfo.baseScale * energyRatio;
+
+    this._position.set(data.position.x, data.position.y, data.position.z);
+    this._quaternion.identity();
+    this._scale.set(scale, scale, scale);
+
+    this._matrix.compose(this._position, this._quaternion, this._scale);
+    mesh.setMatrixAt(corpseInfo.index, this._matrix);
+  }
+
+  removeCorpse(id) {
+    const corpseInfo = this.corpseData.get(id);
+    if (!corpseInfo) return;
+
+    const mesh = corpseInfo.isToxic ? this.toxicMesh : this.normalMesh;
+    const indices = corpseInfo.isToxic ? this.toxicIndices : this.normalIndices;
+
+    this._matrix.makeScale(0, 0, 0);
+    mesh.setMatrixAt(corpseInfo.index, this._matrix);
+
+    indices.push(corpseInfo.index);
+    this.corpseData.delete(id);
+  }
+
+  finishUpdate() {
+    this.normalMesh.instanceMatrix.needsUpdate = true;
+    this.toxicMesh.instanceMatrix.needsUpdate = true;
   }
 
   dispose() {
-    if (this.mesh.geometry) this.mesh.geometry.dispose();
-    if (this.mesh.material) this.mesh.material.dispose();
+    this.scene.remove(this.normalMesh);
+    this.scene.remove(this.toxicMesh);
+    this.normalMesh.geometry.dispose();
+    this.normalMesh.material.dispose();
+    this.toxicMesh.geometry.dispose();
+    this.toxicMesh.material.dispose();
   }
 }
 
@@ -1538,8 +1737,9 @@ export class World {
   constructor(container) {
     this.container = container;
     this.creatureRenderers = new Map(); // id -> CreatureRenderer
-    this.plantRenderers = new Map(); // id -> PlantRenderer
-    this.corpseRenderers = new Map(); // id -> CorpseRenderer
+    // Instanced renderers for plants and corpses (much better performance)
+    this.plantRenderer = null; // InstancedPlantRenderer - initialized after scene
+    this.corpseRenderer = null; // InstancedCorpseRenderer - initialized after scene
     this.time = 0;
     this.noise2D = createNoise2D();
 
@@ -1556,7 +1756,15 @@ export class World {
 
     this.initThree();
     this.initTerrain();
+    this.initInstancedRenderers();
     this.initWorker();
+  }
+
+  initInstancedRenderers() {
+    // Create instanced renderers for plants and corpses
+    // These use InstancedMesh for massive performance gains
+    this.plantRenderer = new InstancedPlantRenderer(this.scene, 8000);
+    this.corpseRenderer = new InstancedCorpseRenderer(this.scene, 500);
   }
 
   initWorker() {
@@ -1598,14 +1806,13 @@ export class World {
       this.scene.add(renderer.mesh);
     }
 
-    // Create initial plant renderers
+    // Add initial plants to instanced renderer
     for (const plantData of data.plants) {
-      const renderer = new PlantRenderer(plantData);
-      this.plantRenderers.set(plantData.id, renderer);
-      this.scene.add(renderer.mesh);
+      this.plantRenderer.addPlant(plantData);
     }
+    this.plantRenderer.finishUpdate();
 
-    console.log(`Worker initialized: ${data.creatures.length} creatures, ${data.plants.length} plants`);
+    console.log(`Worker initialized: ${data.creatures.length} creatures, ${data.plants.length} plants (instanced)`);
   }
 
   handleWorkerUpdate(data) {
@@ -1635,63 +1842,41 @@ export class World {
       }
     }
 
-    // Update existing plants
+    // Update plants using instanced renderer (2 draw calls for all plants!)
     for (const plantData of data.plants) {
-      let renderer = this.plantRenderers.get(plantData.id);
-
-      if (!renderer) {
-        // New plant
-        renderer = new PlantRenderer(plantData);
-        this.plantRenderers.set(plantData.id, renderer);
-        this.scene.add(renderer.mesh);
-      } else {
-        renderer.updateFromData(plantData, 0.016); // Approximate dt for animation
-      }
+      this.plantRenderer.updatePlant(plantData, 0.016);
     }
 
-    // Remove dead/eaten plants
+    // Remove dead/eaten plants from instanced renderer
     for (const deadId of data.deadPlantIds) {
-      const renderer = this.plantRenderers.get(deadId);
-      if (renderer) {
-        this.scene.remove(renderer.mesh);
-        renderer.dispose();
-        this.plantRenderers.delete(deadId);
-      }
+      this.plantRenderer.removePlant(deadId);
     }
 
-    // Update existing corpses
+    // Mark plant instance matrices as updated
+    this.plantRenderer.finishUpdate();
+
+    // Update corpses using instanced renderer
     if (data.corpses) {
       for (const corpseData of data.corpses) {
-        let renderer = this.corpseRenderers.get(corpseData.id);
-
-        if (!renderer) {
-          // New corpse
-          renderer = new CorpseRenderer(corpseData);
-          this.corpseRenderers.set(corpseData.id, renderer);
-          this.scene.add(renderer.mesh);
-        } else {
-          renderer.updateFromData(corpseData);
-        }
+        this.corpseRenderer.updateCorpse(corpseData);
       }
     }
 
-    // Remove decayed/eaten corpses
+    // Remove decayed/eaten corpses from instanced renderer
     if (data.deadCorpseIds) {
       for (const deadId of data.deadCorpseIds) {
-        const renderer = this.corpseRenderers.get(deadId);
-        if (renderer) {
-          this.scene.remove(renderer.mesh);
-          renderer.dispose();
-          this.corpseRenderers.delete(deadId);
-        }
+        this.corpseRenderer.removeCorpse(deadId);
       }
     }
+
+    // Mark corpse instance matrices as updated
+    this.corpseRenderer.finishUpdate();
 
     // Update UI with stats
     this.ui.updateStats({
       creatures: Array.from(this.creatureRenderers.values()).map(r => r.data),
-      plants: Array.from(this.plantRenderers.values()).map(r => r.data),
-      corpses: Array.from(this.corpseRenderers.values()).map(r => r.data),
+      plants: data.plants, // Use data directly since plants are instanced
+      corpses: data.corpses || [],
       time: data.stats.time,
       energySources: data.stats.energySources // Pass diet stats
     });
