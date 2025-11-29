@@ -1536,7 +1536,8 @@ export class World {
     this.scene.fog = new THREE.Fog(0x87CEEB, 200, 1000);
 
     this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 2000);
-    this.camera.position.set(0, 200, 400);
+    // Start camera looking at deep water where creatures spawn (z: -200 to -450)
+    this.camera.position.set(0, 100, -150);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -1545,6 +1546,8 @@ export class World {
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
+    // Set initial target to the deep water area
+    this.controls.target.set(0, 0, -300);
 
     // Keyboard controls
     this.keys = {
@@ -1615,8 +1618,9 @@ export class World {
     const resetBtn = document.getElementById('reset-camera-btn');
     if (resetBtn) {
       resetBtn.addEventListener('click', () => {
-        this.camera.position.set(0, 200, 400);
-        this.controls.target.set(0, 0, 0);
+        // Reset to view deep water where creatures spawn
+        this.camera.position.set(0, 100, -150);
+        this.controls.target.set(0, 0, -300);
         this.controls.update();
       });
     }
@@ -1656,15 +1660,16 @@ export class World {
     this.terrain = new THREE.Mesh(geometry, material);
     this.scene.add(this.terrain);
 
-    // Water plane
+    // Water plane - more transparent to see creatures
     const waterGeo = new THREE.PlaneGeometry(WORLD_SIZE.width, WORLD_SIZE.depth);
     waterGeo.rotateX(-Math.PI / 2);
     const waterMat = new THREE.MeshStandardMaterial({
-      color: 0x0000ff,
+      color: 0x3399ff,
       transparent: true,
-      opacity: 0.4,
+      opacity: 0.2,
       roughness: 0.1,
-      metalness: 0.5
+      metalness: 0.3,
+      side: THREE.DoubleSide  // Visible from underwater too
     });
     this.water = new THREE.Mesh(waterGeo, waterMat);
     this.water.position.y = 0;
@@ -1728,24 +1733,53 @@ export class World {
   update(dt) {
     this.time += dt;
 
-    // Camera keyboard controls
+    // Camera keyboard controls - move relative to camera direction
     const cameraSpeed = 50 * dt;
+
+    // Get camera's forward direction (projected onto XZ plane)
+    const forward = new THREE.Vector3();
+    this.camera.getWorldDirection(forward);
+    forward.y = 0;
+    forward.normalize();
+
+    // Get right direction (perpendicular to forward on XZ plane)
+    const right = new THREE.Vector3();
+    right.crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+
+    // Calculate movement based on arrow keys
+    const movement = new THREE.Vector3(0, 0, 0);
+
     if (this.keys.ArrowUp) {
-      this.camera.position.z -= cameraSpeed;
-      this.controls.target.z -= cameraSpeed;
+      movement.add(forward.clone().multiplyScalar(cameraSpeed));
     }
     if (this.keys.ArrowDown) {
-      this.camera.position.z += cameraSpeed;
-      this.controls.target.z += cameraSpeed;
+      movement.add(forward.clone().multiplyScalar(-cameraSpeed));
     }
     if (this.keys.ArrowLeft) {
-      this.camera.position.x -= cameraSpeed;
-      this.controls.target.x -= cameraSpeed;
+      movement.add(right.clone().multiplyScalar(-cameraSpeed));
     }
     if (this.keys.ArrowRight) {
-      this.camera.position.x += cameraSpeed;
-      this.controls.target.x += cameraSpeed;
+      movement.add(right.clone().multiplyScalar(cameraSpeed));
     }
+
+    // Apply movement to both camera and target
+    this.camera.position.add(movement);
+    this.controls.target.add(movement);
+
+    // Clamp camera position to scene bounds
+    const halfWidth = WORLD_SIZE.width / 2 - 50;  // 450
+    const halfDepth = WORLD_SIZE.depth / 2 - 50;  // 450
+    const minHeight = -15;  // Allow underwater view
+    const maxHeight = 300;
+
+    // Clamp camera position
+    this.camera.position.x = Math.max(-halfWidth, Math.min(halfWidth, this.camera.position.x));
+    this.camera.position.z = Math.max(-halfDepth, Math.min(halfDepth, this.camera.position.z));
+    this.camera.position.y = Math.max(minHeight, Math.min(maxHeight, this.camera.position.y));
+
+    // Clamp target position
+    this.controls.target.x = Math.max(-halfWidth, Math.min(halfWidth, this.controls.target.x));
+    this.controls.target.z = Math.max(-halfDepth, Math.min(halfDepth, this.controls.target.z));
 
     this.controls.update();
 
