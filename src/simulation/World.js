@@ -191,9 +191,54 @@ class PlantRenderer {
 
     this.mesh.position.set(data.position.x, data.position.y, data.position.z);
 
+    // Scale based on energy (plants grow as they photosynthesize)
+    const energyScale = 0.5 + (data.energy / 80) * 0.5;
     // Pulse effect
-    const scale = 1 + Math.sin(this.age * 2) * 0.1;
-    this.mesh.scale.setScalar(scale);
+    const pulse = 1 + Math.sin(this.age * 2) * 0.1;
+    this.mesh.scale.setScalar(energyScale * pulse);
+
+    // Color intensity based on energy
+    const intensity = 0.3 + (data.energy / 80) * 0.7;
+    this.mesh.material.emissive.setRGB(0, intensity * 0.3, 0);
+  }
+
+  dispose() {
+    if (this.mesh.geometry) this.mesh.geometry.dispose();
+    if (this.mesh.material) this.mesh.material.dispose();
+  }
+}
+
+// Rendering-only corpse
+class CorpseRenderer {
+  constructor(data) {
+    this.id = data.id;
+    this.data = data;
+
+    // Corpses are darker, decaying versions of creatures
+    const size = 0.5 + (data.size * 1.5);
+    const geometry = new THREE.SphereGeometry(size, 8, 8);
+    const material = new THREE.MeshStandardMaterial({
+      color: 0x4a3728,  // Brown/decaying color
+      roughness: 0.9,
+      metalness: 0.0
+    });
+
+    this.mesh = new THREE.Mesh(geometry, material);
+    this.mesh.position.set(data.position.x, data.position.y, data.position.z);
+
+    // Toxic corpses have a purple tint
+    if (data.toxicity > 0.3) {
+      material.color.setHex(0x6b3a6b);
+    }
+  }
+
+  updateFromData(data) {
+    this.data = data;
+    this.mesh.position.set(data.position.x, data.position.y, data.position.z);
+
+    // Shrink as energy is consumed/decays
+    const decayScale = Math.max(0.3, data.energy / 100);
+    this.mesh.scale.setScalar(decayScale);
   }
 
   dispose() {
@@ -207,6 +252,7 @@ export class World {
     this.container = container;
     this.creatureRenderers = new Map(); // id -> CreatureRenderer
     this.plantRenderers = new Map(); // id -> PlantRenderer
+    this.corpseRenderers = new Map(); // id -> CorpseRenderer
     this.time = 0;
     this.noise2D = createNoise2D();
 
@@ -326,10 +372,39 @@ export class World {
       }
     }
 
+    // Update existing corpses
+    if (data.corpses) {
+      for (const corpseData of data.corpses) {
+        let renderer = this.corpseRenderers.get(corpseData.id);
+
+        if (!renderer) {
+          // New corpse
+          renderer = new CorpseRenderer(corpseData);
+          this.corpseRenderers.set(corpseData.id, renderer);
+          this.scene.add(renderer.mesh);
+        } else {
+          renderer.updateFromData(corpseData);
+        }
+      }
+    }
+
+    // Remove decayed/eaten corpses
+    if (data.deadCorpseIds) {
+      for (const deadId of data.deadCorpseIds) {
+        const renderer = this.corpseRenderers.get(deadId);
+        if (renderer) {
+          this.scene.remove(renderer.mesh);
+          renderer.dispose();
+          this.corpseRenderers.delete(deadId);
+        }
+      }
+    }
+
     // Update UI with stats
     this.ui.updateStats({
       creatures: Array.from(this.creatureRenderers.values()).map(r => r.data),
       plants: Array.from(this.plantRenderers.values()).map(r => r.data),
+      corpses: Array.from(this.corpseRenderers.values()).map(r => r.data),
       time: data.stats.time
     });
   }
@@ -431,7 +506,8 @@ export class World {
 
       vertices[i + 1] = y;
 
-      const biome = this.getBiome(y);
+      // Use Z-based biome for coloring
+      const biome = this.getBiomeAt(z);
       const color = new THREE.Color(biome.color);
 
       colors.push(color.r, color.g, color.b);
@@ -465,17 +541,56 @@ export class World {
   }
 
   getTerrainHeight(x, z) {
-    let y = this.noise2D(x * 0.005, z * 0.005) * 50;
-    y += this.noise2D(x * 0.01, z * 0.01) * 20;
-    if (y < -20) y = -20;
-    return y;
+    // Small noise for natural variation
+    const noise = this.noise2D(x * 0.02, z * 0.02) * 2;
+
+    // Z determines the base terrain height (horizontal bands)
+    let baseHeight;
+
+    if (z < -300) {
+      // Deep water
+      baseHeight = -20;
+    } else if (z < -100) {
+      // Shoals - gradual slope from deep water to shore
+      const t = (z + 300) / 200;
+      baseHeight = -20 + t * 20;
+    } else if (z < 0) {
+      // Beach
+      const t = (z + 100) / 100;
+      baseHeight = t * 5;
+    } else if (z < 200) {
+      // Grassland
+      const t = z / 200;
+      baseHeight = 5 + t * 5;
+    } else if (z < 350) {
+      // Desert
+      const t = (z - 200) / 150;
+      baseHeight = 10 + t * 5;
+    } else {
+      // Tundra
+      const t = Math.min(1, (z - 350) / 150);
+      baseHeight = 15 + t * 5;
+    }
+
+    return baseHeight + noise;
+  }
+
+  getBiomeAt(z) {
+    if (z < -300) return BIOMES.DEEP_WATER;
+    if (z < -100) return BIOMES.SHOALS;
+    if (z < 0) return BIOMES.BEACH;
+    if (z < 200) return BIOMES.LAND;
+    if (z < 350) return BIOMES.DESERT;
+    return BIOMES.TUNDRA;
   }
 
   getBiome(y) {
+    // Legacy - kept for compatibility
     if (y < BIOMES.DEEP_WATER.heightMax) return BIOMES.DEEP_WATER;
     if (y < BIOMES.SHOALS.heightMax) return BIOMES.SHOALS;
     if (y < BIOMES.BEACH.heightMax) return BIOMES.BEACH;
     if (y < BIOMES.LAND.heightMax) return BIOMES.LAND;
+    if (y < BIOMES.DESERT.heightMax) return BIOMES.DESERT;
     return BIOMES.TUNDRA;
   }
 

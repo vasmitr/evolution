@@ -52,23 +52,32 @@ export const BIOMES = {
     temp: 25,
     hasCurrent: false 
   },
-  LAND: { 
-    name: 'Land', 
-    color: 0x228B22, 
-    heightMax: 40, 
-    drag: 0.01, 
-    friction: 0.8, 
+  LAND: {
+    name: 'Grassland',
+    color: 0x228B22,
+    heightMax: 40,
+    drag: 0.01,
+    friction: 0.8,
     temp: 20,
-    hasCurrent: false 
+    hasCurrent: false
   },
-  TUNDRA: { 
-    name: 'Tundra', 
-    color: 0xFFFFFF, 
-    heightMax: 100, 
-    drag: 0.01, 
-    friction: 0.7, 
+  DESERT: {
+    name: 'Desert',
+    color: 0xEDC9AF,
+    heightMax: 60,
+    drag: 0.01,
+    friction: 0.5,
+    temp: 40,
+    hasCurrent: false
+  },
+  TUNDRA: {
+    name: 'Tundra',
+    color: 0xE8E8E8,
+    heightMax: 100,
+    drag: 0.01,
+    friction: 0.7,
     temp: -10,
-    hasCurrent: false 
+    hasCurrent: false
   }
 };
 

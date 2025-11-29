@@ -28,8 +28,11 @@ export class UI {
       <div id="stat-time">Time: 0s</div>
       <div id="stat-season">Season: Spring</div>
       <div id="stat-creatures">Creatures: 0</div>
+      <div id="stat-mature">Mature: 0</div>
       <div id="stat-plants">Plants: 0</div>
+      <div id="stat-corpses">Corpses: 0</div>
       <div id="stat-generation">Max Generation: 0</div>
+      <div id="stat-avg-age">Avg Age: 0s</div>
       <div style="margin-top: 10px;"><strong>AVERAGE GENES</strong></div>
       <div id="avg-genes"></div>
     `;
@@ -85,12 +88,26 @@ export class UI {
     document.getElementById('stat-creatures').textContent = `Creatures: ${world.creatures.length}`;
     document.getElementById('stat-plants').textContent = `Plants: ${world.plants.length}`;
 
-    // Calculate max generation
+    // Count corpses
+    const corpseCount = world.corpses ? world.corpses.length : 0;
+    document.getElementById('stat-corpses').textContent = `Corpses: ${corpseCount}`;
+
+    // Calculate stats from creatures
     let maxGen = 0;
+    let matureCount = 0;
+    let totalAge = 0;
+
     world.creatures.forEach(c => {
       if (c.generation > maxGen) maxGen = c.generation;
+      if (c.mature) matureCount++;
+      totalAge += c.age || 0;
     });
+
     document.getElementById('stat-generation').textContent = `Max Generation: ${maxGen}`;
+    document.getElementById('stat-mature').textContent = `Mature: ${matureCount}`;
+
+    const avgAge = world.creatures.length > 0 ? totalAge / world.creatures.length : 0;
+    document.getElementById('stat-avg-age').textContent = `Avg Age: ${avgAge.toFixed(1)}s`;
 
     // Calculate average genes
     if (world.creatures.length > 0) {
@@ -124,11 +141,15 @@ export class UI {
     const panel = document.getElementById('creature-panel');
     panel.style.display = 'block';
 
+    const agePercent = creature.maxAge ? ((creature.age / creature.maxAge) * 100).toFixed(0) : 0;
+    const maturityStatus = creature.mature ? '✓ Mature' : `Growing (${((creature.developmentProgress || 0) * 100).toFixed(0)}%)`;
+
     let html = `
       <div><strong>SELECTED CREATURE</strong></div>
       <div>Generation: ${creature.generation || 0}</div>
-      <div>Age: ${Math.floor(creature.age)}s</div>
+      <div>Age: ${Math.floor(creature.age)}s / ${Math.floor(creature.maxAge || 0)}s (${agePercent}%)</div>
       <div>Energy: ${Math.floor(creature.energy)}</div>
+      <div>Status: ${maturityStatus}</div>
       <div style="margin-top: 10px;"><strong>GENES</strong></div>
     `;
 
