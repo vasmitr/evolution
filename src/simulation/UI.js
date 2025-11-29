@@ -16,6 +16,10 @@ export class UI {
     this.dietHistoryLength = 180; // Average over ~3 seconds at 60fps for very smooth stats
     this.dietUpdateCounter = 0;
     this.dietUpdateInterval = 30; // Update display every 30 frames (~2 times per second)
+
+    // FPS tracking
+    this.fpsFrames = [];
+    this.lastFpsUpdate = performance.now();
   }
 
   createStatsPanel() {
@@ -45,7 +49,7 @@ export class UI {
       <div id="stat-corpses">Corpses: 0</div>
       <div id="stat-generation">Max Generation: 0</div>
       <div id="stat-avg-age">Avg Age: 0s</div>
-      <div id="stat-lod" style="color:#8af; font-size:10px; margin-top:5px;"></div>
+      <div id="stat-fps" style="color:#8af; margin-top:5px;"></div>
       <div style="margin-top: 10px;">
         <button id="reset-camera-btn" style="
           background: #444; 
@@ -217,12 +221,16 @@ export class UI {
     const avgAge = world.creatures.length > 0 ? totalAge / world.creatures.length : 0;
     document.getElementById('stat-avg-age').textContent = `Avg Age: ${avgAge.toFixed(1)}s`;
 
-    // Update LOD stats if available
-    if (world.lodStats) {
-      const { detailed, lod, culled, pooled } = world.lodStats;
-      document.getElementById('stat-lod').textContent =
-        `LOD: ${detailed} detailed, ${lod} simple, ${culled} culled (pool: ${pooled})`;
+    // Update FPS
+    const now = performance.now();
+    this.fpsFrames.push(now);
+    // Keep only frames from last second
+    while (this.fpsFrames.length > 0 && this.fpsFrames[0] < now - 1000) {
+      this.fpsFrames.shift();
     }
+    const fps = this.fpsFrames.length;
+    const fpsColor = fps >= 50 ? '#8f8' : fps >= 30 ? '#ff8' : '#f88';
+    document.getElementById('stat-fps').innerHTML = `FPS: <span style="color:${fpsColor}">${fps}</span>`;
 
     // Calculate average genes
     if (world.creatures.length > 0) {

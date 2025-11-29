@@ -2281,15 +2281,13 @@ export class World {
     // Mark corpse instance matrices as updated
     this.corpseRenderer.finishUpdate();
 
-    // Update UI with stats (including LOD stats)
-    const lodStats = this.creatureManager.getStats();
+    // Update UI with stats
     this.ui.updateStats({
       creatures: this.creatureManager.getAllCreatureData(),
       plants: data.plants,
       corpses: data.corpses || [],
       time: data.stats.time,
-      energySources: data.stats.energySources,
-      lodStats // { detailed, lod, culled, total, pooled }
+      energySources: data.stats.energySources
     });
   }
 
