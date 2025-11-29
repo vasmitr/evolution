@@ -32,22 +32,23 @@ export const GENE_DEFINITIONS = {
 // Each creature will carry its own copy that can mutate
 export const DEFAULT_GENE_WEIGHTS = {
   // Energy costs per gene (per second, multiplied by gene value)
+  // Reduced costs to help creatures survive
   energyCosts: {
-    size: 0.08,           // Bigger = more expensive to maintain
-    speed: 0.02,          // Fast muscles cost energy
-    sight: 0.04,          // Eyes are expensive
-    smell: 0.01,          // Smell is cheap
-    hearing: 0.02,        // Moderate cost
-    camouflage: 0.01,     // Pigment maintenance
-    armor: 0.02,          // Shell maintenance
-    toxicity: 0.03,       // Toxin synthesis
-    coldResistance: 0.01,
-    heatResistance: 0.01,
-    lungCapacity: 0.02,
-    limbs: 0.02,
-    jaws: 0.02,
-    predatory: 0.02,      // High-stress metabolism
-    filterFeeding: 0.005  // Very cheap passive system
+    size: 0.03,           // Bigger = more expensive to maintain
+    speed: 0.01,          // Fast muscles cost energy
+    sight: 0.02,          // Eyes are expensive
+    smell: 0.005,         // Smell is cheap
+    hearing: 0.01,        // Moderate cost
+    camouflage: 0.005,    // Pigment maintenance
+    armor: 0.01,          // Shell maintenance
+    toxicity: 0.015,      // Toxin synthesis
+    coldResistance: 0.005,
+    heatResistance: 0.005,
+    lungCapacity: 0.01,
+    limbs: 0.01,
+    jaws: 0.01,
+    predatory: 0.01,      // High-stress metabolism
+    filterFeeding: 0.002  // Very cheap passive system
   },
 
   // Development costs (one-time cost to grow the feature)
@@ -112,10 +113,10 @@ export const DEFAULT_GENE_WEIGHTS = {
 
   // Filter feeding (passive food intake)
   filterFeeding: {
-    baseGain: 0.1,                // Base energy per second in water
-    filterFeedingMultiplier: 3,   // Bonus from filterFeeding gene
-    smellBonus: 0.5,              // Better at catching particles with smell
-    maxSpeed: 0.3                 // Only works when moving slowly
+    baseGain: 0.5,                // Base energy per second in water (increased from 0.1)
+    filterFeedingMultiplier: 4,   // Bonus from filterFeeding gene
+    smellBonus: 0.8,              // Better at catching particles with smell
+    maxSpeed: 0.5                 // Only works when moving slowly
   },
 
   // Reproduction
@@ -203,8 +204,8 @@ export const BIOMES = {
 export const SIMULATION_CONFIG = {
   mutationRate: 0.8,       // 80% of offspring mutate (was 10%)
   mutationAmount: 4,       // Up to 4 genes mutate at once
-  initialPopulation: 50,
-  foodSpawnRate: 0.5,
+  initialPopulation: 100,  // More starting creatures for diversity
+  foodSpawnRate: 2.0,      // Much higher plant spawn rate
   maxCreatures: 2000,
-  maxPlants: 3000
+  maxPlants: 5000          // More plants allowed
 };

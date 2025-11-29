@@ -845,10 +845,21 @@ function initPopulation() {
   plants = [];
   corpses = [];
 
-  // Spawn initial plants across all biomes
-  for (let i = 0; i < 500; i++) {
+  // Spawn initial plants - heavily biased toward water where creatures start
+  // 80% in water (z < -100), 20% on land
+  for (let i = 0; i < 2000; i++) {
     const x = (Math.random() - 0.5) * WORLD_SIZE.width;
-    const z = (Math.random() - 0.5) * WORLD_SIZE.depth;
+
+    // Bias toward water zones where creatures live
+    let z;
+    if (Math.random() < 0.8) {
+      // Water zone: z from -100 to -500 (deep water where creatures spawn)
+      z = -100 - Math.random() * 400;
+    } else {
+      // Land zone: z from -100 to +500
+      z = -100 + Math.random() * 600;
+    }
+
     const terrainH = getTerrainHeight(x, z);
 
     // Water zone is z < -100
@@ -860,10 +871,10 @@ function initPopulation() {
       // Land plants sit on the terrain surface
       y = terrainH + 0.5;
     } else {
-      // Water plants stay in the lower portion of water column (where creatures swim)
+      // Water plants float at various depths - spread throughout water column
       const waterDepth = Math.abs(terrainH);
-      // Plants grow in bottom 40% of water column, same zone as creatures
-      y = terrainH + 0.5 + Math.random() * Math.min(waterDepth * 0.4, 5);
+      // Plants grow throughout water column where creatures swim
+      y = terrainH + 1 + Math.random() * Math.max(waterDepth * 0.6, 8);
     }
 
     const plant = new WorkerPlant({ x, y, z }, nextPlantId++, isOnLand);
@@ -1477,12 +1488,22 @@ function update(dt) {
     }
   }
 
-  // Random spawn plants - lower rate since plants now reproduce
-  const plantSpawnChance = SIMULATION_CONFIG.foodSpawnRate * 0.3 * (1 - plants.length / SIMULATION_CONFIG.maxPlants);
+  // Random spawn plants - biased toward water where creatures need food
+  const plantSpawnChance = SIMULATION_CONFIG.foodSpawnRate * 0.5 * (1 - plants.length / SIMULATION_CONFIG.maxPlants);
 
   if (Math.random() < plantSpawnChance && plants.length < SIMULATION_CONFIG.maxPlants) {
     const x = (Math.random() - 0.5) * WORLD_SIZE.width * 0.95;  // Stay within bounds
-    const z = (Math.random() - 0.5) * WORLD_SIZE.depth * 0.95;
+
+    // Bias toward water zones (70% water, 30% land)
+    let z;
+    if (Math.random() < 0.7) {
+      // Water zone
+      z = -100 - Math.random() * 400;
+    } else {
+      // Land zone
+      z = -100 + Math.random() * 600;
+    }
+
     const terrainH = getTerrainHeight(x, z);
 
     // Water zone is z < -100
@@ -1494,9 +1515,9 @@ function update(dt) {
       // Land plants sit on the terrain surface
       y = terrainH + 0.5;
     } else {
-      // Water plants stay in the lower portion where creatures swim
+      // Water plants float throughout water column
       const waterDepth = Math.abs(terrainH);
-      y = terrainH + 0.5 + Math.random() * Math.min(waterDepth * 0.4, 5);
+      y = terrainH + 1 + Math.random() * Math.max(waterDepth * 0.6, 8);
     }
 
     const plant = new WorkerPlant({ x, y, z }, nextPlantId++, isOnLand);

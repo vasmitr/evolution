@@ -213,10 +213,11 @@ class CorpseRenderer {
   constructor(data) {
     this.id = data.id;
     this.data = data;
+    this.initialEnergy = data.energy || 100;
 
     // Corpses are darker, decaying versions of creatures
-    const size = 0.5 + (data.size * 1.5);
-    const geometry = new THREE.SphereGeometry(size, 8, 8);
+    // Use unit sphere, scale based on creature size
+    const geometry = new THREE.SphereGeometry(1, 8, 8);
     const material = new THREE.MeshStandardMaterial({
       color: 0x4a3728,  // Brown/decaying color
       roughness: 0.9,
@@ -225,6 +226,10 @@ class CorpseRenderer {
 
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.position.set(data.position.x, data.position.y, data.position.z);
+
+    // Base scale from creature size (capped to reasonable range)
+    this.baseScale = Math.min(2, 0.5 + (data.size || 0) * 1.5);
+    this.mesh.scale.setScalar(this.baseScale);
 
     // Toxic corpses have a purple tint
     if (data.toxicity > 0.3) {
@@ -236,9 +241,9 @@ class CorpseRenderer {
     this.data = data;
     this.mesh.position.set(data.position.x, data.position.y, data.position.z);
 
-    // Shrink as energy is consumed/decays
-    const decayScale = Math.max(0.3, data.energy / 100);
-    this.mesh.scale.setScalar(decayScale);
+    // Shrink as energy is consumed/decays (relative to initial energy, capped)
+    const energyRatio = Math.min(1, Math.max(0.2, data.energy / this.initialEnergy));
+    this.mesh.scale.setScalar(this.baseScale * energyRatio);
   }
 
   dispose() {
