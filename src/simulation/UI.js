@@ -5,7 +5,8 @@ export class UI {
     this.createStatsPanel();
     this.createCreaturePanel();
     this.createDietPanel();
-    
+    this.createLegendPanel();
+
     // Smoothing for diet stats (rolling average)
     this.dietHistory = {
       plants: [],
@@ -68,8 +69,9 @@ export class UI {
     panel.id = 'creature-panel';
     panel.style.cssText = `
       position: absolute;
-      bottom: 10px;
-      left: 10px;
+      top: 50px;
+      left: 50%;
+      transform: translateX(-50%);
       background: rgba(0, 0, 0, 0.8);
       color: white;
       padding: 15px;
@@ -82,7 +84,7 @@ export class UI {
       display: none;
       pointer-events: none;
     `;
-    
+
     document.body.appendChild(panel);
   }
 
@@ -102,14 +104,58 @@ export class UI {
       min-width: 200px;
       pointer-events: none;
     `;
-    
+
     panel.innerHTML = `
       <div><strong>DIET (Energy/s)</strong></div>
       <div id="diet-stats"></div>
-      <div style="margin-top: 10px;"><strong>POPULATION</strong></div>
-      <div id="population-breakdown"></div>
     `;
-    
+
+    document.body.appendChild(panel);
+  }
+
+  createLegendPanel() {
+    const panel = document.createElement('div');
+    panel.id = 'legend-panel';
+    panel.style.cssText = `
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 10px 20px;
+      font-family: monospace;
+      font-size: 12px;
+      border-radius: 5px;
+      pointer-events: none;
+      display: flex;
+      gap: 20px;
+      align-items: center;
+    `;
+
+    panel.innerHTML = `
+      <div><strong>CREATURE TYPES</strong></div>
+      <div style="display: flex; gap: 15px;">
+        <div style="display: flex; align-items: center; gap: 5px;">
+          <span style="display: inline-block; width: 12px; height: 12px; background: linear-gradient(90deg, #666 50%, #c22 50%); border-radius: 2px;"></span>
+          <span style="color:#f88;">Predator</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 5px;">
+          <span style="display: inline-block; width: 12px; height: 12px; background: radial-gradient(circle, #94a 30%, #666 30%); border-radius: 2px;"></span>
+          <span style="color:#a6f;">Parasite</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 5px;">
+          <span style="display: inline-block; width: 12px; height: 12px; background: linear-gradient(135deg, #864 25%, #666 25%, #666 50%, #864 50%, #864 75%, #666 75%); border-radius: 2px;"></span>
+          <span style="color:#da8;">Scavenger</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 5px;">
+          <span style="display: inline-block; width: 12px; height: 12px; background: #6a6; border-radius: 2px;"></span>
+          <span style="color:#8f8;">Herbivore</span>
+        </div>
+      </div>
+      <div id="population-breakdown" style="display: flex; gap: 10px; font-size: 11px;"></div>
+    `;
+
     document.body.appendChild(panel);
   }
 
@@ -265,18 +311,13 @@ export class UI {
           }
         });
 
-        // Display population breakdown
+        // Display population breakdown (horizontal format for legend)
         let popHtml = '';
         if (world.creatures.length > 0) {
-          const predPct = ((predators / world.creatures.length) * 100).toFixed(0);
-          const paraPct = ((parasites / world.creatures.length) * 100).toFixed(0);
-          const scavPct = ((scavengers / world.creatures.length) * 100).toFixed(0);
-          const herbPct = ((herbivores / world.creatures.length) * 100).toFixed(0);
-          
-          popHtml += `<div style="color:#f88;">Predators: ${predators} (${predPct}%)</div>`;
-          popHtml += `<div style="color:#a6f;">Parasites: ${parasites} (${paraPct}%)</div>`;
-          popHtml += `<div style="color:#da8;">Scavengers: ${scavengers} (${scavPct}%)</div>`;
-          popHtml += `<div style="color:#8f8;">Herbivores: ${herbivores} (${herbPct}%)</div>`;
+          popHtml += `<span style="color:#f88;">${predators}</span>`;
+          popHtml += `<span style="color:#a6f;">${parasites}</span>`;
+          popHtml += `<span style="color:#da8;">${scavengers}</span>`;
+          popHtml += `<span style="color:#8f8;">${herbivores}</span>`;
         }
         document.getElementById('population-breakdown').innerHTML = popHtml;
       }
