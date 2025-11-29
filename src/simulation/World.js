@@ -1881,8 +1881,8 @@ class InstancedPlantRenderer {
     this.landIndices = []; // Available indices for land plants
     this.time = 0;
 
-    // Culling settings - hide plants beyond this distance from camera
-    this.cullDistance = 200; // Aggressive culling for better FPS
+    // Culling settings - use same distance as creatures (LOD_CONFIG.cullDistance = 500)
+    this.cullDistance = LOD_CONFIG.cullDistance;
     this.camera = null; // Set by World
 
     // Shared geometry for all plants
