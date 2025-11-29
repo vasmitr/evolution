@@ -1881,8 +1881,8 @@ class InstancedPlantRenderer {
     this.landIndices = []; // Available indices for land plants
     this.time = 0;
 
-    // Culling settings - use same distance as creatures (LOD_CONFIG.cullDistance = 500)
-    this.cullDistance = LOD_CONFIG.cullDistance;
+    // Culling settings - use lodDistance (250) where creatures become LOD spheres
+    this.cullDistance = LOD_CONFIG.lodDistance;
     this.camera = null; // Set by World
 
     // Shared geometry for all plants
