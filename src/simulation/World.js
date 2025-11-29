@@ -46,11 +46,19 @@ class CreatureRenderer {
   createMesh(data) {
     // Determine body color based on primary trait
     const bodyColor = this.getBodyColor(data);
-    const bodyMat = new THREE.MeshStandardMaterial({
-      color: bodyColor,
-      roughness: 0.6,
-      metalness: 0.05
-    });
+    const pattern = this.getFoodHabitPattern(data);
+
+    // Create body material - use shader if pattern exists
+    let bodyMat;
+    if (pattern) {
+      bodyMat = this.createPatternMaterial(bodyColor, pattern);
+    } else {
+      bodyMat = new THREE.MeshStandardMaterial({
+        color: bodyColor,
+        roughness: 0.6,
+        metalness: 0.05
+      });
+    }
 
     // Body shape - organic icosahedron base
     let bodyGeo;
@@ -99,7 +107,6 @@ class CreatureRenderer {
     this.buildArmor(data);
     this.buildSpecialFeatures(data);
     this.buildEmergentFeatures(data, bodyColor);
-    this.buildFoodHabitPattern(data);
   }
 
   getBodyColor(data) {
@@ -127,110 +134,166 @@ class CreatureRenderer {
   getFoodHabitPattern(data) {
     // Determine dominant food habit
     if (data.predatory > 0.4) {
-      return { type: 'stripes', color: 0xcc2222 }; // Red stripes for predators
+      return { type: 'stripes', color: new THREE.Color(0xcc2222), intensity: data.predatory }; // Red stripes for predators
     }
     if (data.parasitic > 0.3) {
-      return { type: 'spots', color: 0x9944aa }; // Purple spots for parasites
+      return { type: 'spots', color: new THREE.Color(0x9944aa), intensity: data.parasitic }; // Purple spots for parasites
     }
     if (data.scavenging > 0.4) {
-      return { type: 'patches', color: 0x886644 }; // Brown patches for scavengers
+      return { type: 'patches', color: new THREE.Color(0x886644), intensity: data.scavenging }; // Brown patches for scavengers
     }
     if (data.filterFeeding > 0.4) {
-      return { type: 'rings', color: 0x4488cc }; // Blue rings for filter feeders
+      return { type: 'waves', color: new THREE.Color(0x4488cc), intensity: data.filterFeeding }; // Blue waves for filter feeders
     }
     // Herbivores - no pattern (or subtle green)
     return null;
   }
 
-  buildFoodHabitPattern(data) {
-    const pattern = this.getFoodHabitPattern(data);
-    if (!pattern) return;
+  // Create shader material with pattern on body surface
+  createPatternMaterial(bodyColor, pattern) {
+    // Custom shader for procedural patterns on body surface
+    const vertexShader = `
+      varying vec3 vNormal;
+      varying vec3 vPosition;
+      varying vec2 vUv;
 
-    this.patternGroup = new THREE.Group();
-    const patternMat = new THREE.MeshStandardMaterial({
-      color: pattern.color,
-      roughness: 0.5,
-      metalness: 0.0
+      void main() {
+        vNormal = normalize(normalMatrix * normal);
+        vPosition = position;
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `;
+
+    // Fragment shader with different pattern types
+    const fragmentShader = `
+      uniform vec3 baseColor;
+      uniform vec3 patternColor;
+      uniform float patternIntensity;
+      uniform int patternType; // 0=stripes, 1=spots, 2=patches, 3=waves
+      uniform float time;
+      uniform float seed;
+
+      varying vec3 vNormal;
+      varying vec3 vPosition;
+      varying vec2 vUv;
+
+      // Simple noise function
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+      }
+
+      float noise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        float a = hash(i);
+        float b = hash(i + vec2(1.0, 0.0));
+        float c = hash(i + vec2(0.0, 1.0));
+        float d = hash(i + vec2(1.0, 1.0));
+        return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+      }
+
+      // 3D noise for volumetric patterns
+      float noise3D(vec3 p) {
+        return noise(p.xy + p.z * 17.0);
+      }
+
+      void main() {
+        vec3 color = baseColor;
+        float patternMask = 0.0;
+
+        // Use position for pattern mapping (works well for spheres)
+        vec3 pos = normalize(vPosition);
+
+        if (patternType == 0) {
+          // STRIPES - tiger/wasp like bands along body
+          float stripeFreq = 4.0 + patternIntensity * 6.0; // More stripes with higher intensity
+          float stripe = sin(pos.z * stripeFreq * 3.14159 + seed);
+          // Add some noise for organic feel
+          stripe += noise(pos.xy * 10.0 + seed) * 0.3;
+          patternMask = smoothstep(0.3, 0.5, stripe);
+
+        } else if (patternType == 1) {
+          // SPOTS - leopard/poison frog like spots
+          float spotScale = 6.0 + patternIntensity * 4.0;
+          vec2 spotUV = vec2(atan(pos.x, pos.z), pos.y) * spotScale;
+
+          // Create spots using cellular noise approximation
+          vec2 cell = floor(spotUV + seed);
+          vec2 cellOffset = fract(spotUV + seed);
+
+          float minDist = 1.0;
+          for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+              vec2 neighbor = vec2(float(x), float(y));
+              vec2 point = hash(cell + neighbor + seed) * 0.5 + 0.25 + neighbor;
+              float dist = length(cellOffset - point);
+              minDist = min(minDist, dist);
+            }
+          }
+
+          float spotSize = 0.2 + patternIntensity * 0.15;
+          patternMask = 1.0 - smoothstep(spotSize * 0.5, spotSize, minDist);
+
+        } else if (patternType == 2) {
+          // PATCHES - hyena/vulture like irregular patches
+          float patchScale = 3.0 + patternIntensity * 2.0;
+          vec2 patchUV = vec2(atan(pos.x, pos.z), pos.y) * patchScale;
+
+          // Layered noise for irregular patches
+          float n1 = noise(patchUV + seed);
+          float n2 = noise(patchUV * 2.0 + seed + 100.0) * 0.5;
+          float n3 = noise(patchUV * 4.0 + seed + 200.0) * 0.25;
+          float patchNoise = n1 + n2 + n3;
+
+          // Create patches with threshold
+          float threshold = 0.8 - patternIntensity * 0.3;
+          patternMask = smoothstep(threshold, threshold + 0.2, patchNoise);
+
+        } else if (patternType == 3) {
+          // WAVES - flowing wave pattern for filter feeders
+          float waveFreq = 3.0 + patternIntensity * 4.0;
+          vec2 waveUV = vec2(atan(pos.x, pos.z), pos.y);
+
+          // Flowing waves with noise distortion
+          float wave = sin(waveUV.y * waveFreq * 3.14159 + waveUV.x * 2.0 + seed);
+          wave += noise(waveUV * 5.0 + seed) * 0.4;
+
+          // Create wavy bands
+          patternMask = smoothstep(0.2, 0.4, abs(wave)) * (1.0 - smoothstep(0.4, 0.6, abs(wave)));
+        }
+
+        // Mix base color with pattern color
+        color = mix(baseColor, patternColor, patternMask * patternIntensity);
+
+        // Simple lighting
+        vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
+        float diff = max(dot(vNormal, lightDir), 0.0);
+        float ambient = 0.4;
+        float lighting = ambient + diff * 0.6;
+
+        gl_FragColor = vec4(color * lighting, 1.0);
+      }
+    `;
+
+    // Create shader material
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        baseColor: { value: bodyColor },
+        patternColor: { value: pattern.color },
+        patternIntensity: { value: pattern.intensity },
+        patternType: { value: pattern.type === 'stripes' ? 0 : pattern.type === 'spots' ? 1 : pattern.type === 'patches' ? 2 : 3 },
+        time: { value: 0 },
+        seed: { value: Math.random() * 100 }
+      },
+      vertexShader,
+      fragmentShader
     });
 
-    if (pattern.type === 'stripes') {
-      // Vertical stripes along the body (like a tiger/wasp)
-      const stripeCount = 3 + Math.floor(data.predatory * 4); // 3-7 stripes
-      for (let i = 0; i < stripeCount; i++) {
-        const t = (i / (stripeCount - 1)) - 0.5; // -0.5 to 0.5
-        const zPos = t * 1.4; // Spread along body length
-
-        // Create a ring/band around the body
-        const stripeGeo = new THREE.TorusGeometry(0.95, 0.04, 8, 16);
-        const stripe = new THREE.Mesh(stripeGeo, patternMat);
-        stripe.position.set(0, 0, zPos);
-        stripe.rotation.x = Math.PI / 2;
-        this.patternGroup.add(stripe);
-      }
-    } else if (pattern.type === 'spots') {
-      // Scattered spots on the body (like a leopard/poison frog)
-      const spotCount = 5 + Math.floor(data.parasitic * 8); // 5-13 spots
-      for (let i = 0; i < spotCount; i++) {
-        const spotGeo = new THREE.CircleGeometry(0.08 + Math.random() * 0.06, 8);
-        const spot = new THREE.Mesh(spotGeo, patternMat);
-
-        // Distribute on body surface
-        const theta = Math.random() * Math.PI * 2;
-        const phi = Math.random() * Math.PI * 0.8 - Math.PI * 0.4;
-        const r = 1.01; // Just above body surface
-        spot.position.set(
-          Math.sin(theta) * Math.cos(phi) * r,
-          Math.sin(phi) * r,
-          Math.cos(theta) * Math.cos(phi) * r
-        );
-        spot.lookAt(0, 0, 0);
-        spot.rotateX(Math.PI); // Face outward
-        this.patternGroup.add(spot);
-      }
-    } else if (pattern.type === 'patches') {
-      // Irregular patches (like a hyena/vulture)
-      const patchCount = 3 + Math.floor(data.scavenging * 4); // 3-7 patches
-      for (let i = 0; i < patchCount; i++) {
-        // Irregular shape using deformed circle
-        const patchGeo = new THREE.CircleGeometry(0.15 + Math.random() * 0.1, 6);
-        const positions = patchGeo.attributes.position;
-        for (let j = 1; j < positions.count; j++) {
-          const x = positions.getX(j);
-          const y = positions.getY(j);
-          positions.setX(j, x * (0.7 + Math.random() * 0.6));
-          positions.setY(j, y * (0.7 + Math.random() * 0.6));
-        }
-        patchGeo.attributes.position.needsUpdate = true;
-
-        const patch = new THREE.Mesh(patchGeo, patternMat);
-
-        const theta = Math.random() * Math.PI * 2;
-        const phi = Math.random() * Math.PI * 0.6 - Math.PI * 0.3;
-        const r = 1.01;
-        patch.position.set(
-          Math.sin(theta) * Math.cos(phi) * r,
-          Math.sin(phi) * r + 0.2,
-          Math.cos(theta) * Math.cos(phi) * r
-        );
-        patch.lookAt(0, 0, 0);
-        patch.rotateX(Math.PI);
-        patch.rotation.z = Math.random() * Math.PI; // Random rotation
-        this.patternGroup.add(patch);
-      }
-    } else if (pattern.type === 'rings') {
-      // Concentric rings (like a target/filter feeder appearance)
-      const ringCount = 2 + Math.floor(data.filterFeeding * 3); // 2-5 rings
-      for (let i = 0; i < ringCount; i++) {
-        const radius = 0.3 + i * 0.2;
-        const ringGeo = new THREE.TorusGeometry(radius, 0.03, 6, 24);
-        const ring = new THREE.Mesh(ringGeo, patternMat);
-        ring.position.set(0, 0, 0.5); // On the front/face
-        this.patternGroup.add(ring);
-      }
-    }
-
-    this.mesh.add(this.patternGroup);
+    return material;
   }
+
 
   buildEyes(data) {
     if (data.sight < 0.15) return; // No visible eyes for blind creatures
