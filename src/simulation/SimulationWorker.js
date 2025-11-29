@@ -84,48 +84,43 @@ function getBiome(y) {
 // Get current/wave force at position
 function getCurrentAt(x, z, terrainHeight) {
   const t = currentTime;
-  const scale = 0.005;
+  
+  // Multi-layered noise for chaotic flow
+  // Layer 1: Large slow swirls
+  const scale1 = 0.002;
+  const n1 = currentNoise(x * scale1, z * scale1 + t * 0.05);
+  const angle1 = n1 * Math.PI * 4;
+  
+  // Layer 2: Smaller faster eddies
+  const scale2 = 0.01;
+  const n2 = currentNoise(x * scale2 - t * 0.1, z * scale2);
+  const angle2 = n2 * Math.PI * 2;
+  
+  // Combine flows
+  let currentX = Math.cos(angle1) * 1.5 + Math.cos(angle2) * 0.5;
+  let currentZ = Math.sin(angle1) * 1.5 + Math.sin(angle2) * 0.5;
+  
+  // Vertical mixing (upwelling/downwelling)
+  // Use a third noise layer for vertical flow
+  const scale3 = 0.015;
+  const n3 = currentNoise(x * scale3 + 100, z * scale3 + t * 0.1);
+  let currentY = n3 * 0.5;
 
-  const eps = 1;
-  const n1 = currentNoise(x * scale, z * scale + t * 0.1);
-  const n2 = currentNoise(x * scale + eps, z * scale + t * 0.1);
-  const n3 = currentNoise(x * scale, z * scale + eps + t * 0.1);
-
-  let currentX = (n3 - n1) / eps;
-  let currentZ = -(n2 - n1) / eps;
-
-  const waveFreq = 0.02;
-  const waveSpeed = 2;
-  const waveX = Math.cos(t * waveSpeed + x * waveFreq) * 0.3;
-  const waveZ = Math.sin(t * waveSpeed * 0.7 + z * waveFreq) * 0.3;
-
-  currentX += waveX;
-  currentZ += waveZ;
-
-  let strength = 1.0;
-  if (terrainHeight > -5) {
-    strength = Math.max(0, (-terrainHeight) / 5);
+  // Boundary/Terrain interaction
+  // Flow should generally follow terrain contours or be deflected
+  if (terrainHeight > -20) {
+     // Near shore/shallow: Push away or along shore
+     // Simple repulsion from shallow areas
+     const depthFactor = Math.max(0, (-terrainHeight) / 20); // 0 at surface, 1 at -20
+     currentX *= depthFactor;
+     currentZ *= depthFactor;
+     
+     // Add some wave action pushing to shore then pulling back
+     const wave = Math.sin(t * 1.0 + x * 0.05);
+     currentX += wave * 0.5 * (1 - depthFactor);
   }
-
-  if (terrainHeight > -3 && strength > 0) {
-    const sampleDist = 5;
-    const hX1 = getTerrainHeight(x + sampleDist, z);
-    const hX2 = getTerrainHeight(x - sampleDist, z);
-    const hZ1 = getTerrainHeight(x, z + sampleDist);
-    const hZ2 = getTerrainHeight(x, z - sampleDist);
-
-    const gradX = hX1 - hX2;
-    const gradZ = hZ1 - hZ2;
-    const gradMag = Math.sqrt(gradX * gradX + gradZ * gradZ);
-
-    if (gradMag > 0.1) {
-      const currentMag = Math.sqrt(currentX * currentX + currentZ * currentZ);
-      currentX = -gradZ / gradMag * currentMag;
-      currentZ = gradX / gradMag * currentMag;
-    }
-  }
-
-  return { x: currentX * strength, z: currentZ * strength };
+  
+  return { x: currentX, y: currentY, z: currentZ };
 }
 
 // Helper: Gaussian random number
@@ -182,6 +177,11 @@ class DNA {
         // This helps evolution get started from zero
         if (currentVal < 0.1 && Math.random() < 0.3) {
           mutation = Math.abs(mutation);
+        }
+
+        // Bonus mutation: small chance to get a significant boost (unlocking abilities)
+        if (Math.random() < 0.05) {
+           mutation += (Math.random() * 0.2 + 0.1); // Add 0.1 to 0.3
         }
 
         this.genes[randomKey] = Math.max(0, Math.min(1, currentVal + mutation));
@@ -398,7 +398,7 @@ class WorkerCreature {
 
     // Development costs
     if (!this.mature) {
-      const maturityTime = 10;
+      const maturityTime = w.reproduction.maturityAge || 15;
       this.developmentProgress = Math.min(1, this.age / maturityTime);
 
       let totalDevCost = 0;
@@ -1042,11 +1042,14 @@ function update(dt) {
 
       // Current - directly moves creatures (same as plants for consistency)
       // Creatures drift with current unless they have high speed to resist
+      // Current - directly moves creatures (same as plants for consistency)
+      // Creatures drift with current unless they have high speed to resist
       const current = getCurrentAt(c.position.x, c.position.z, terrainHeight);
       const currentResistance = c.speed * 0.5; // Higher speed = resist current more
       const currentInfluence = 1.0 - currentResistance;
       // Apply current directly to position (like plants) scaled by dt
       c.position.x += current.x * dt * 3 * currentInfluence;
+      c.position.y += current.y * dt * 3 * currentInfluence; // Vertical mixing
       c.position.z += current.z * dt * 3 * currentInfluence;
 
       // Creatures with high lung capacity and limbs can climb onto beach (z > -100)
@@ -1104,8 +1107,12 @@ function update(dt) {
 
     // Active swimming/movement behavior - creatures with speed actively move
     // This gives evolved speed genes a purpose even when not hunting/foraging
+    // Active swimming/movement behavior - creatures with speed actively move
+    // This gives evolved speed genes a purpose even when not hunting/foraging
     if (c.speed > 0.1 || c.maneuverability > 0.1) {
-      const swimForce = c.maxForce * (0.3 + c.speed * 0.5 + c.maneuverability * 0.2);
+      // Significantly increased base force so movement is visible
+      // Was 0.3 base, now 0.8
+      const swimForce = c.maxForce * (0.8 + c.speed * 1.5 + c.maneuverability * 0.5);
 
       if (isInWater) {
         // Swimming - random exploration with momentum
@@ -1115,7 +1122,7 @@ function update(dt) {
           c.acceleration.x += Math.cos(angle) * swimForce;
           c.acceleration.z += Math.sin(angle) * swimForce;
           // Slight vertical movement for 3D swimming
-          c.acceleration.y += (Math.random() - 0.5) * swimForce * 0.3;
+          c.acceleration.y += (Math.random() - 0.5) * swimForce * 0.5;
         } else if (Math.random() < 0.1) {
           // Continue in roughly same direction with small adjustments
           const vLen = Math.sqrt(c.velocity.x ** 2 + c.velocity.z ** 2);
@@ -1144,7 +1151,7 @@ function update(dt) {
     }
 
     // Hunting behavior - predatory creatures seek prey
-    if (c.mature && c.predatory > 0.3 && c.jaws > 0.2 && c.energy < 100) {
+    if (c.predatory > 0.3 && c.jaws > 0.2) {
       // Calculate water depth for sense effectiveness
       const waterDepth = isInWater ? Math.abs(terrainHeight) : 0;
       const effectiveSenseRange = c.getSenseRange(isInWater, waterDepth);
@@ -1229,7 +1236,7 @@ function update(dt) {
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
         // Move towards corpse if hungry (slowly)
-        if (c.energy < 80 && dist > 3) {
+        if (dist > 3) {
           const scavSpeed = c.maxForce * c.scavenging * 0.5;
           c.acceleration.x += (dx / dist) * scavSpeed;
           c.acceleration.z += (dz / dist) * scavSpeed;
@@ -1246,7 +1253,7 @@ function update(dt) {
     }
 
     // Parasitic behavior - parasites seek larger hosts and drain energy
-    if (c.parasitic > 0.3 && c.energy < 80) {
+    if (c.parasitic > 0.3) {
       const nearbyHosts = creatureSpatialGrid.getNearby(c.position.x, c.position.z, 2);
 
       let bestHost = null;
@@ -1347,7 +1354,7 @@ function update(dt) {
     }
 
     // Foraging behavior - hungry creatures actively seek plants
-    if (c.energy < 120 && c.predatory < 0.7) {
+    if (c.predatory < 0.7) {
       // Use senses to find food
       const waterDepth = isInWater ? Math.abs(terrainHeight) : 0;
       const foodSenseRange = c.getSenseRange(isInWater, waterDepth) * 0.7; // Shorter range for food
@@ -1406,8 +1413,11 @@ function update(dt) {
     const offspring = c.update(dt, currentBiome);
 
     // Re-enforce terrain collision after update
+    // Ensure they stay ON the surface if they are close to it
     const finalTerrainHeight = getTerrainHeight(c.position.x, c.position.z);
     const finalMinHeight = finalTerrainHeight + c.size;
+    
+    // Snap to surface if slightly below or very close (prevent jitter)
     if (c.position.y < finalMinHeight) {
       c.position.y = finalMinHeight;
       if (c.velocity.y < 0) c.velocity.y = 0;
@@ -1501,6 +1511,7 @@ function update(dt) {
       const current = getCurrentAt(p.position.x, p.position.z, terrainHeight);
       const newX = p.position.x + current.x * dt * 3;  // Slower drift
       const newZ = p.position.z + current.z * dt * 3;
+      p.position.y += current.y * dt * 3; // Vertical drift
 
       // Check bounds before moving
       if (Math.abs(newX) < plantHalfWidth && Math.abs(newZ) < plantHalfDepth) {
@@ -1533,6 +1544,63 @@ function update(dt) {
     if (p.dead) {
       deadPlantIds.push(p.id);
       plants.splice(j, 1);
+    }
+  }
+
+  // 1. Background Plant Spawning (Prevent Extinction)
+  // If plant count is low, or just periodically, spawn new plants
+  // This simulates algae blooms or seeds drifting in from outside
+  // 1. Background Plant Spawning (Robust System)
+  // Ensure there's always enough food relative to the creature population
+  // Base spawn rate from config
+  let spawnCount = SIMULATION_CONFIG.foodSpawnRate * dt;
+  
+  // Dynamic adjustment: if plant/creature ratio is low, spawn MORE
+  if (creatures.length > 0) {
+    const ratio = plants.length / creatures.length;
+    if (ratio < 2.0) {
+      // Crisis mode: not enough food! Boost spawning significantly
+      spawnCount *= 5;
+    } else if (ratio < 4.0) {
+      // Warning mode: getting low
+      spawnCount *= 2;
+    }
+  }
+  
+  // Accumulate fractional spawns (probabilistic)
+  const countToSpawn = Math.floor(spawnCount) + (Math.random() < (spawnCount % 1) ? 1 : 0);
+  
+  if (plants.length < SIMULATION_CONFIG.maxPlants && countToSpawn > 0) {
+    for (let k = 0; k < countToSpawn; k++) {
+       const x = (Math.random() - 0.5) * WORLD_SIZE.width;
+       
+       // Smart Spawning: Target areas with fewer plants? 
+       // For now, just bias heavily toward water (80%) since that's where the crisis is
+       let z;
+       if (Math.random() < 0.8) {
+         z = -100 - Math.random() * 400; // Deep water zone
+       } else {
+         z = -100 + Math.random() * 600; // Land/Beach
+       }
+       
+       const terrainH = getTerrainHeight(x, z);
+       const isInWaterZone = z < -100;
+       const isOnLand = !isInWaterZone;
+       
+       let y;
+       if (isOnLand) {
+         y = terrainH + 0.5;
+       } else {
+         const waterDepth = Math.abs(terrainH);
+         // Spawn at random depths to fill the volume
+         y = terrainH + 1 + Math.random() * Math.max(waterDepth * 0.9, 10);
+       }
+       
+       const newPlant = new WorkerPlant({ x, y, z }, nextPlantId++, isOnLand);
+       // Give new plants a boost so they are worth eating immediately
+       newPlant.energy = 25; 
+       plants.push(newPlant);
+       newPlants.push(newPlant.toData());
     }
   }
 

@@ -33,6 +33,18 @@ export class UI {
       <div id="stat-corpses">Corpses: 0</div>
       <div id="stat-generation">Max Generation: 0</div>
       <div id="stat-avg-age">Avg Age: 0s</div>
+      <div style="margin-top: 10px;">
+        <button id="reset-camera-btn" style="
+          background: #444; 
+          color: white; 
+          border: 1px solid #666; 
+          padding: 5px 10px; 
+          cursor: pointer; 
+          pointer-events: auto;
+          border-radius: 3px;
+          font-family: monospace;
+        ">Reset Camera</button>
+      </div>
       <div style="margin-top: 10px;"><strong>AVERAGE GENES</strong></div>
       <div id="avg-genes"></div>
     `;

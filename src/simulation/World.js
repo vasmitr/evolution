@@ -4,164 +4,426 @@ import { createNoise2D } from 'simplex-noise';
 import { UI } from './UI.js';
 import { WORLD_SIZE, BIOMES } from './Constants.js';
 
+// Shared geometries and materials for performance
+const SharedGeometries = {
+  body: {
+    sphere: new THREE.SphereGeometry(1, 8, 8),
+    torpedo: new THREE.CapsuleGeometry(0.4, 1.2, 4, 8),
+    flat: new THREE.SphereGeometry(1, 8, 6),
+  },
+  eye: new THREE.SphereGeometry(0.15, 6, 6),
+  pupil: new THREE.SphereGeometry(0.08, 4, 4),
+  limb: new THREE.CapsuleGeometry(0.06, 0.4, 3, 6),
+  foot: new THREE.SphereGeometry(0.1, 4, 4),
+  fin: new THREE.BoxGeometry(0.02, 0.3, 0.2),
+  tailFin: new THREE.BoxGeometry(0.02, 0.25, 0.35),
+  jaw: new THREE.BoxGeometry(0.3, 0.08, 0.15),
+  tooth: new THREE.ConeGeometry(0.03, 0.1, 3),
+  spike: new THREE.ConeGeometry(0.05, 0.25, 3),
+  probe: new THREE.CylinderGeometry(0.03, 0.015, 0.5, 4),
+};
+
 // Rendering-only creature (mesh wrapper)
 class CreatureRenderer {
   constructor(data) {
     this.id = data.id;
     this.data = data;
+    this.animTime = 0;
+    this.isEating = false;
+    this.eatingTimer = 0;
 
     this.mesh = new THREE.Group();
-    this.bodyMesh = null;
-    this.armorGroup = null;
-    this.coldMesh = null;
-    this.limbsGroup = null;
-    this.jawsGroup = null;
-
     this.createMesh(data);
-    this.updateFromData(data);
   }
 
   createMesh(data) {
-    let geometry;
-    if (data.maneuverability > 0.7) {
-      geometry = new THREE.ConeGeometry(0.8, 2, 16);
-      geometry.rotateX(Math.PI / 2);
-    } else if (data.maneuverability < 0.3) {
-      geometry = new THREE.BoxGeometry(1.5, 1, 1);
-    } else {
-      geometry = new THREE.SphereGeometry(1, 16, 16);
-    }
-
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x00ff00,
+    // Determine body color based on primary trait
+    const bodyColor = this.getBodyColor(data);
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color: bodyColor,
       roughness: 0.7,
       metalness: 0.1
     });
 
-    this.bodyMesh = new THREE.Mesh(geometry, material);
+    // Body shape - simpler selection
+    let bodyGeo;
+    if (data.speed > 0.5) {
+      bodyGeo = SharedGeometries.body.torpedo;
+    } else if (data.filterFeeding > 0.4) {
+      bodyGeo = SharedGeometries.body.flat;
+    } else {
+      bodyGeo = SharedGeometries.body.sphere;
+    }
+
+    this.bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
+    if (data.speed > 0.5) {
+      this.bodyMesh.rotation.x = Math.PI / 2; // Point forward
+    }
     this.mesh.add(this.bodyMesh);
 
-    // Armor/Shell
-    this.armorGroup = new THREE.Group();
-    this.mesh.add(this.armorGroup);
-
-    // Cold Resistance
-    this.coldMesh = new THREE.Mesh(
-      new THREE.SphereGeometry(1.05, 16, 16),
-      new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0 })
-    );
-    this.mesh.add(this.coldMesh);
-
-    // Limbs Group
-    this.limbsGroup = new THREE.Group();
-    this.mesh.add(this.limbsGroup);
-
-    // Jaws Group
-    this.jawsGroup = new THREE.Group();
-    this.mesh.add(this.jawsGroup);
-
-    this.updateVisuals(data);
-  }
-
-  updateVisuals(data) {
-    // Color based on toxicity
-    if (this.bodyMesh) {
-      if (data.toxicity > 0.5) {
-        this.bodyMesh.material.color.setHSL(0, 1, 0.5);
-      } else {
-        this.bodyMesh.material.color.setHSL(0.3, 0.5, 0.5);
-      }
-    }
-
     // Scale based on size
-    const scale = 0.5 + (data.size * 1.5);
+    const scale = 0.8 + data.size * 1.2;
     this.mesh.scale.set(scale, scale, scale);
 
-    // Armor Spikes
-    if (data.armor > 0.3 && this.armorGroup.children.length === 0) {
-      const spikeGeo = new THREE.ConeGeometry(0.1, 0.5, 4);
-      const spikeMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
+    // Create feature groups
+    this.eyesGroup = new THREE.Group();
+    this.limbsGroup = new THREE.Group();
+    this.finsGroup = new THREE.Group();
+    this.jawsGroup = new THREE.Group();
+    this.armorGroup = new THREE.Group();
 
-      for (let i = 0; i < 8; i++) {
-        const spike = new THREE.Mesh(spikeGeo, spikeMat);
-        spike.position.set(
-          (Math.random() - 0.5) * 2,
-          (Math.random() - 0.5) * 2,
-          (Math.random() - 0.5) * 2
-        ).normalize().multiplyScalar(1.1);
-        spike.lookAt(0, 0, 0);
-        this.armorGroup.add(spike);
-      }
+    this.mesh.add(this.eyesGroup);
+    this.mesh.add(this.limbsGroup);
+    this.mesh.add(this.finsGroup);
+    this.mesh.add(this.jawsGroup);
+    this.mesh.add(this.armorGroup);
+
+    // Build features
+    this.buildEyes(data);
+    this.buildLimbs(data, bodyColor);
+    this.buildFins(data);
+    this.buildJaws(data);
+    this.buildArmor(data);
+    this.buildSpecialFeatures(data);
+  }
+
+  getBodyColor(data) {
+    // Priority-based coloring
+    if (data.toxicity > 0.4) {
+      return new THREE.Color(0xff3333); // Bright red = toxic warning
     }
-
-    // Cold Resistance
-    if (data.coldResistance > 0.5) {
-      this.coldMesh.material.opacity = 0.3 + (data.coldResistance - 0.5);
-      this.coldMesh.scale.setScalar(1 + data.coldResistance * 0.2);
-    } else {
-      this.coldMesh.material.opacity = 0;
+    if (data.predatory > 0.4) {
+      return new THREE.Color(0xdd6622); // Orange = predator
     }
-
-    // Limbs
-    if (data.limbs > 0.3 && this.limbsGroup.children.length === 0) {
-      const limbGeo = new THREE.CylinderGeometry(0.1, 0.1, 1);
-      const limbMat = new THREE.MeshStandardMaterial({ color: 0x00aa00 });
-
-      const positions = [
-        [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5],
-        [0.5, -0.5, -0.5], [-0.5, -0.5, -0.5]
-      ];
-
-      positions.forEach(pos => {
-        const limb = new THREE.Mesh(limbGeo, limbMat);
-        limb.position.set(...pos);
-        limb.rotation.x = Math.PI / 2;
-        this.limbsGroup.add(limb);
-      });
+    if (data.parasitic > 0.3) {
+      return new THREE.Color(0x9944aa); // Purple = parasite
     }
+    if (data.scavenging > 0.4) {
+      return new THREE.Color(0x886644); // Brown = scavenger
+    }
+    if (data.coldResistance > 0.4) {
+      return new THREE.Color(0x88aacc); // Blue-gray = cold adapted
+    }
+    if (data.heatResistance > 0.4) {
+      return new THREE.Color(0xcc8844); // Tan = heat adapted
+    }
+    // Default - greenish based on how "herbivore-like"
+    const greenness = 0.3 + (1 - data.predatory) * 0.4;
+    return new THREE.Color().setHSL(greenness, 0.6, 0.45);
+  }
 
-    // Jaws
-    if (data.jaws > 0.3 && this.jawsGroup.children.length === 0) {
-      const jawGeo = new THREE.BoxGeometry(0.5, 0.2, 0.5);
-      const jawMat = new THREE.MeshStandardMaterial({ color: 0xaa0000 });
-      const jaw = new THREE.Mesh(jawGeo, jawMat);
-      jaw.position.set(0, 0, 1);
-      this.jawsGroup.add(jaw);
+  buildEyes(data) {
+    if (data.sight < 0.15) return; // No visible eyes for blind creatures
 
-      if (data.jaws > 0.7) {
-        const toothGeo = new THREE.ConeGeometry(0.05, 0.2, 4);
-        const toothMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
-        const tooth = new THREE.Mesh(toothGeo, toothMat);
-        tooth.position.set(0, 0.2, 1.2);
-        tooth.rotation.x = -Math.PI / 4;
-        this.jawsGroup.add(tooth);
+    const eyeWhiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    const pupilMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+
+    // Eye size scales with sight
+    const eyeScale = 0.8 + data.sight * 0.6;
+
+    // Two eyes on the front of body
+    const eyeSpacing = 0.25;
+    const eyeForward = 0.85;
+    const eyeHeight = 0.15;
+
+    [-1, 1].forEach((side) => {
+      // Eye white
+      const eye = new THREE.Mesh(SharedGeometries.eye, eyeWhiteMat);
+      eye.position.set(side * eyeSpacing, eyeHeight, eyeForward);
+      eye.scale.setScalar(eyeScale);
+      this.eyesGroup.add(eye);
+
+      // Pupil
+      const pupil = new THREE.Mesh(SharedGeometries.pupil, pupilMat);
+      pupil.position.set(side * eyeSpacing, eyeHeight, eyeForward + 0.1 * eyeScale);
+      pupil.scale.setScalar(eyeScale);
+      pupil.userData.baseX = side * eyeSpacing;
+      this.eyesGroup.add(pupil);
+    });
+  }
+
+  buildLimbs(data, bodyColor) {
+    if (data.limbs < 0.25) return;
+
+    const limbMat = new THREE.MeshStandardMaterial({
+      color: bodyColor.clone().multiplyScalar(0.75)
+    });
+
+    // Number of limbs: 2 for low, 4 for medium, 6 for high
+    const limbCount = data.limbs > 0.6 ? 6 : (data.limbs > 0.4 ? 4 : 2);
+    const limbLength = 0.5 + data.limbs * 0.4;
+
+    // Create limb pairs symmetrically
+    for (let i = 0; i < limbCount; i++) {
+      const pairIndex = Math.floor(i / 2);
+      const side = (i % 2 === 0) ? -1 : 1;
+      const zPos = 0.3 - pairIndex * 0.35; // Front to back
+
+      // Upper limb segment
+      const limb = new THREE.Mesh(SharedGeometries.limb, limbMat);
+      limb.scale.y = limbLength;
+      limb.position.set(side * 0.6, -0.2, zPos);
+      limb.rotation.z = side * 0.4; // Angle outward
+      limb.rotation.x = 0.3;
+      limb.userData.side = side;
+      limb.userData.pairIndex = pairIndex;
+      this.limbsGroup.add(limb);
+
+      // Foot/paddle
+      const foot = new THREE.Mesh(SharedGeometries.foot, limbMat);
+      foot.position.set(
+        side * (0.6 + limbLength * 0.3),
+        -0.2 - limbLength * 0.5,
+        zPos
+      );
+      foot.scale.set(1, 0.6, 1.3); // Flattened paddle shape
+      foot.userData.isFootOf = this.limbsGroup.children.length - 1;
+      this.limbsGroup.add(foot);
+    }
+  }
+
+  buildFins(data) {
+    if (data.speed < 0.25 || data.limbs > 0.5) return; // No fins if has limbs
+
+    const finMat = new THREE.MeshStandardMaterial({
+      color: 0x4488aa,
+      transparent: true,
+      opacity: 0.8,
+      side: THREE.DoubleSide
+    });
+
+    // Dorsal fin (top)
+    const dorsalFin = new THREE.Mesh(SharedGeometries.fin, finMat);
+    dorsalFin.position.set(0, 0.7, 0);
+    dorsalFin.scale.y = 0.5 + data.speed * 0.8;
+    this.finsGroup.add(dorsalFin);
+
+    // Tail fin
+    const tailFin = new THREE.Mesh(SharedGeometries.tailFin, finMat);
+    tailFin.position.set(0, 0, -1.0);
+    tailFin.scale.set(1, 0.8 + data.speed * 0.5, 1);
+    this.finsGroup.add(tailFin);
+
+    // Side fins (pectoral)
+    [-1, 1].forEach((side) => {
+      const sideFin = new THREE.Mesh(SharedGeometries.fin, finMat);
+      sideFin.position.set(side * 0.5, 0, 0.2);
+      sideFin.rotation.z = side * 0.8;
+      sideFin.rotation.y = side * 0.3;
+      sideFin.scale.set(1, 0.6, 1.2);
+      this.finsGroup.add(sideFin);
+    });
+  }
+
+  buildJaws(data) {
+    if (data.jaws < 0.2) return;
+
+    const jawMat = new THREE.MeshStandardMaterial({ color: 0xaa2222 });
+    const toothMat = new THREE.MeshStandardMaterial({ color: 0xffffee });
+
+    const jawScale = 0.8 + data.jaws * 0.6;
+
+    // Upper jaw
+    const upperJaw = new THREE.Mesh(SharedGeometries.jaw, jawMat);
+    upperJaw.position.set(0, 0.06, 1.0);
+    upperJaw.scale.setScalar(jawScale);
+    upperJaw.userData.restY = 0.06;
+    this.jawsGroup.add(upperJaw);
+
+    // Lower jaw
+    const lowerJaw = new THREE.Mesh(SharedGeometries.jaw, jawMat);
+    lowerJaw.position.set(0, -0.06, 1.0);
+    lowerJaw.scale.setScalar(jawScale);
+    lowerJaw.userData.restY = -0.06;
+    this.jawsGroup.add(lowerJaw);
+
+    // Teeth for predators with strong jaws
+    if (data.jaws > 0.4 && data.predatory > 0.3) {
+      const teethCount = Math.floor(2 + data.jaws * 3);
+      for (let i = 0; i < teethCount; i++) {
+        const xPos = (i - (teethCount - 1) / 2) * 0.08;
+
+        // Upper teeth (point down)
+        const upperTooth = new THREE.Mesh(SharedGeometries.tooth, toothMat);
+        upperTooth.position.set(xPos, 0, 1.05);
+        upperTooth.rotation.x = Math.PI;
+        upperTooth.scale.setScalar(jawScale * 0.8);
+        this.jawsGroup.add(upperTooth);
+
+        // Lower teeth (point up)
+        const lowerTooth = new THREE.Mesh(SharedGeometries.tooth, toothMat);
+        lowerTooth.position.set(xPos, -0.1, 1.05);
+        lowerTooth.scale.setScalar(jawScale * 0.8);
+        this.jawsGroup.add(lowerTooth);
       }
     }
   }
 
-  updateFromData(data) {
+  buildArmor(data) {
+    if (data.armor < 0.3) return;
+
+    const spikeMat = new THREE.MeshStandardMaterial({
+      color: 0x555555,
+      metalness: 0.4,
+      roughness: 0.6
+    });
+
+    const spikeCount = Math.floor(3 + data.armor * 6);
+
+    // Distribute spikes on upper body
+    for (let i = 0; i < spikeCount; i++) {
+      const spike = new THREE.Mesh(SharedGeometries.spike, spikeMat);
+
+      // Place on upper hemisphere
+      const theta = (i / spikeCount) * Math.PI * 2;
+      const phi = 0.3 + Math.random() * 0.5;
+
+      spike.position.set(
+        Math.sin(phi) * Math.cos(theta) * 0.9,
+        Math.cos(phi) * 0.9,
+        Math.sin(phi) * Math.sin(theta) * 0.9
+      );
+      spike.scale.setScalar(0.8 + data.armor * 0.6);
+      spike.lookAt(spike.position.clone().multiplyScalar(2));
+      this.armorGroup.add(spike);
+    }
+  }
+
+  buildSpecialFeatures(data) {
+    // Cold resistance - fluffy outline
+    if (data.coldResistance > 0.35) {
+      const fluffMat = new THREE.MeshStandardMaterial({
+        color: 0xddddee,
+        transparent: true,
+        opacity: 0.25 + data.coldResistance * 0.2
+      });
+      this.coldMesh = new THREE.Mesh(SharedGeometries.body.sphere, fluffMat);
+      this.coldMesh.scale.setScalar(1.15 + data.coldResistance * 0.1);
+      this.mesh.add(this.coldMesh);
+    }
+
+    // Parasitic probe
+    if (data.parasitic > 0.3) {
+      const probeMat = new THREE.MeshStandardMaterial({ color: 0x662266 });
+      this.probeMesh = new THREE.Mesh(SharedGeometries.probe, probeMat);
+      this.probeMesh.position.set(0, -0.15, 0.7);
+      this.probeMesh.rotation.x = Math.PI / 3;
+      this.mesh.add(this.probeMesh);
+    }
+  }
+
+  updateFromData(data, dt = 0.016) {
+    const prevData = this.data;
     this.data = data;
+    this.animTime += dt;
 
     // Update position
     this.mesh.position.set(data.position.x, data.position.y, data.position.z);
 
-    // Rotate to face velocity
-    if (data.velocity) {
-      const velLen = Math.sqrt(data.velocity.x ** 2 + data.velocity.y ** 2 + data.velocity.z ** 2);
-      if (velLen > 0.001) {
-        const targetQuaternion = new THREE.Quaternion();
-        const m = new THREE.Matrix4();
-        const vel = new THREE.Vector3(data.velocity.x, data.velocity.y, data.velocity.z);
-        m.lookAt(vel, new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0));
-        targetQuaternion.setFromRotationMatrix(m);
-        this.mesh.quaternion.slerp(targetQuaternion, 0.1);
+    // Calculate movement speed
+    const velLen = data.velocity ?
+      Math.sqrt(data.velocity.x ** 2 + data.velocity.y ** 2 + data.velocity.z ** 2) : 0;
+
+    // Face movement direction
+    if (data.velocity && velLen > 0.01) {
+      const vel = new THREE.Vector3(data.velocity.x, data.velocity.y, data.velocity.z);
+      const m = new THREE.Matrix4().lookAt(vel, new THREE.Vector3(), new THREE.Vector3(0, 1, 0));
+      const targetQuat = new THREE.Quaternion().setFromRotationMatrix(m);
+      this.mesh.quaternion.slerp(targetQuat, 0.12);
+    }
+
+    // Detect eating (energy increased significantly)
+    if (prevData && data.energy > prevData.energy + 0.5) {
+      this.isEating = true;
+      this.eatingTimer = 0.5; // Eat animation duration
+    }
+    if (this.eatingTimer > 0) {
+      this.eatingTimer -= dt;
+      if (this.eatingTimer <= 0) this.isEating = false;
+    }
+
+    // Animation speed based on movement
+    const animSpeed = Math.min(velLen * 8, 4);
+
+    // === SWIMMING ANIMATION (body wiggle + tail) ===
+    if (velLen > 0.02) {
+      const wiggle = Math.sin(this.animTime * animSpeed * 3) * 0.08 * Math.min(velLen, 0.5);
+      this.bodyMesh.rotation.y = wiggle;
+
+      // Tail fin wag
+      if (this.finsGroup.children.length > 1) {
+        const tail = this.finsGroup.children[1];
+        tail.rotation.y = Math.sin(this.animTime * animSpeed * 4) * 0.5;
       }
+
+      // Side fins flap
+      for (let i = 2; i < this.finsGroup.children.length; i++) {
+        const fin = this.finsGroup.children[i];
+        const side = (i === 2) ? -1 : 1;
+        fin.rotation.z = side * (0.8 + Math.sin(this.animTime * animSpeed * 2) * 0.2);
+      }
+    }
+
+    // === WALKING/PADDLING ANIMATION (limbs) ===
+    if (this.limbsGroup.children.length > 0 && velLen > 0.01) {
+      const limbPhase = this.animTime * animSpeed * 2.5;
+
+      this.limbsGroup.children.forEach((child) => {
+        if (child.userData.side !== undefined) {
+          // This is a limb (not a foot)
+          const phase = limbPhase + child.userData.pairIndex * Math.PI + (child.userData.side > 0 ? Math.PI / 2 : 0);
+          const swing = Math.sin(phase) * 0.4 * Math.min(velLen * 3, 1);
+          child.rotation.x = 0.3 + swing;
+        }
+      });
+    }
+
+    // === EATING ANIMATION (jaw chomp) ===
+    if (this.jawsGroup.children.length >= 2) {
+      const upperJaw = this.jawsGroup.children[0];
+      const lowerJaw = this.jawsGroup.children[1];
+
+      if (this.isEating) {
+        // Chomping
+        const chomp = Math.sin(this.animTime * 20) * 0.5 + 0.5;
+        upperJaw.position.y = upperJaw.userData.restY + chomp * 0.08;
+        lowerJaw.position.y = lowerJaw.userData.restY - chomp * 0.08;
+      } else {
+        // Return to rest
+        upperJaw.position.y += (upperJaw.userData.restY - upperJaw.position.y) * 0.2;
+        lowerJaw.position.y += (lowerJaw.userData.restY - lowerJaw.position.y) * 0.2;
+      }
+    }
+
+    // === IDLE ANIMATIONS ===
+    // Subtle breathing
+    const breathe = 1 + Math.sin(this.animTime * 1.5) * 0.015;
+    const baseScale = 0.8 + data.size * 1.2;
+    this.mesh.scale.setScalar(baseScale * breathe);
+
+    // Eye pupil movement (looking around)
+    if (this.eyesGroup.children.length > 0) {
+      for (let i = 1; i < this.eyesGroup.children.length; i += 2) {
+        const pupil = this.eyesGroup.children[i];
+        if (pupil.userData.baseX !== undefined) {
+          const lookX = Math.sin(this.animTime * 0.4) * 0.03;
+          const lookY = Math.sin(this.animTime * 0.3 + 1) * 0.02;
+          pupil.position.x = pupil.userData.baseX + lookX;
+          pupil.position.y = 0.15 + lookY;
+        }
+      }
+    }
+
+    // Parasite probe animation
+    if (this.probeMesh && data.parasitic > 0.3) {
+      this.probeMesh.rotation.x = Math.PI / 3 + Math.sin(this.animTime * 2) * 0.15;
+      this.probeMesh.position.z = 0.7 + Math.sin(this.animTime * 1.5) * 0.05;
     }
   }
 
   dispose() {
     this.mesh.traverse((child) => {
-      if (child.geometry) child.geometry.dispose();
+      // Don't dispose shared geometries
       if (child.material) child.material.dispose();
     });
   }
@@ -347,7 +609,7 @@ export class World {
         this.creatureRenderers.set(creatureData.id, renderer);
         this.scene.add(renderer.mesh);
       } else {
-        renderer.updateFromData(creatureData);
+        renderer.updateFromData(creatureData, 0.016); // ~60fps dt for animations
       }
     }
 
@@ -502,6 +764,16 @@ export class World {
         this.ui.hideCreature();
       }
     });
+
+    // Reset Camera Button
+    const resetBtn = document.getElementById('reset-camera-btn');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        this.camera.position.set(0, 200, 400);
+        this.controls.target.set(0, 0, 0);
+        this.controls.update();
+      });
+    }
   }
 
   initTerrain() {
