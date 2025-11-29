@@ -766,20 +766,11 @@ class WorkerCorpse {
   update(dt, biome) {
     this.age += dt;
 
-    // Decay rate affected by temperature
-    let decayRate = 1.0;
-    if (biome) {
-      if (biome.temp < 5) {
-        decayRate = 0.3;  // Cold preserves
-      } else if (biome.temp > 25) {
-        decayRate = 2.0;  // Heat accelerates decay
-      }
-    }
-
-    // Gradual energy loss from decay
-    this.energy -= 0.5 * decayRate * dt;
-
-    if (this.age > this.maxAge || this.energy <= 0) {
+    // Corpses no longer decay over time - they persist until eaten
+    // This makes scavenging a reliable food source
+    
+    // Only mark as dead when completely consumed
+    if (this.energy <= 0) {
       this.dead = true;
     }
   }
@@ -1255,31 +1246,57 @@ function update(dt) {
       }
     }
 
-    // Scavenging behavior - creatures with scavenging trait seek corpses
-    if (c.scavenging > 0.2) {
-      const nearbyCorpses = corpseSpatialGrid.getNearby(c.position.x, c.position.z, 2);
+    // Scavenging behavior - all carnivores can eat corpses
+    // Specialists (high scavenging) are better at finding them
+    if (c.scavenging > 0.2 || c.predatory > 0.5) {
+      // Use senses to find corpses
+      const waterDepth = isInWater ? Math.abs(terrainHeight) : 0;
+      const corpseSenseRange = c.getSenseRange(isInWater, waterDepth) * 0.8; // Good range for corpses
+      const gridRange = Math.ceil(corpseSenseRange / 50) + 1;
+      const nearbyCorpses = corpseSpatialGrid.getNearby(c.position.x, c.position.z, gridRange);
+      
+      // Find best corpse target
+      let bestCorpse = null;
+      let bestDist = Infinity;
 
       for (const corpse of nearbyCorpses) {
-        if (corpse.dead) continue;
+        if (corpse.dead || corpse.energy < 5) continue;
 
         const dx = corpse.position.x - c.position.x;
         const dy = corpse.position.y - c.position.y;
         const dz = corpse.position.z - c.position.z;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        
+        // Can detect corpses with smell (primary) and sight
+        // Scavenging specialists have better detection
+        const scavBonus = c.scavenging * 20;
+        const corpseDetectRange = 10 + c.smell * 40 + c.sight * 15 + scavBonus;
+        if (dist < corpseDetectRange && dist < bestDist) {
+          bestCorpse = corpse;
+          bestDist = dist;
+        }
+      }
 
-        // Move towards corpse if hungry (slowly)
+      if (bestCorpse) {
+        const dx = bestCorpse.position.x - c.position.x;
+        const dy = bestCorpse.position.y - c.position.y;
+        const dz = bestCorpse.position.z - c.position.z;
+        const dist = bestDist;
+        
+        // Move towards corpse
         if (dist > 3) {
-          const scavSpeed = c.maxForce * c.scavenging * 0.5;
+          const scavSpeed = c.maxForce * (0.5 + c.scavenging * 0.5);
           c.acceleration.x += (dx / dist) * scavSpeed;
+          c.acceleration.y += (dy / dist) * scavSpeed * 0.2;
           c.acceleration.z += (dz / dist) * scavSpeed;
         }
 
         // Eat from corpse if close
-        if (dist < 3 + c.size + corpse.size) {
-          const gained = c.scavenge(corpse);
+        if (dist < 3 + c.size + bestCorpse.size) {
+          const gained = c.scavenge(bestCorpse);
           energyStats.meat += gained * (0.3 + c.scavenging * 0.7); // Track actual energy gained
-          if (corpse.energy <= 0) {
-            corpse.dead = true;
+          if (bestCorpse.energy <= 0) {
+            bestCorpse.dead = true;
           }
         }
       }
@@ -1419,9 +1436,21 @@ function update(dt) {
 
       // Collect valid plant targets instead of just finding closest
       const validPlants = [];
+      
+      // Check if creature is in water and lacks amphibious capabilities
+      // Use -110 instead of -100 to create a buffer zone at the shoreline
+      const creatureInWater = c.position.z < -110;
+      const canGoOnLand = c.lungCapacity >= 0.5 && c.limbs >= 0.5;
 
       for (const plant of nearbyPlants) {
         if (plant.dead) continue;
+        
+        // Filter out land plants BEFORE distance calculation for water creatures
+        // Plants at z > -100 are on land
+        const plantOnLand = plant.position.z > -100;
+        if (plantOnLand && creatureInWater && !canGoOnLand) {
+          continue; // Don't even consider land plants if can't reach them
+        }
 
         const dx = plant.position.x - c.position.x;
         const dy = plant.position.y - c.position.y;
