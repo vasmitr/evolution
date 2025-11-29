@@ -65,9 +65,20 @@ export class UI {
 
   // Helper to get gene value from creature (works with both old and new formats)
   getGeneValue(creature, key) {
+    // New format: dna.genes.key
+    if (creature.dna && creature.dna.genes && creature.dna.genes[key] !== undefined) {
+      return creature.dna.genes[key];
+    }
+    // Method access (worker-side)
     if (creature.dna && typeof creature.dna.getGene === 'function') {
       return creature.dna.getGene(key);
-    } else if (creature.dna && creature.dna[key] !== undefined) {
+    }
+    // Direct property on creature (cached values)
+    if (creature[key] !== undefined) {
+      return creature[key];
+    }
+    // Old format fallback
+    if (creature.dna && creature.dna[key] !== undefined) {
       return creature.dna[key];
     }
     return 0;

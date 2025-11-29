@@ -2,7 +2,7 @@
 // This runs all the heavy computation off the main thread
 
 import { createNoise2D } from 'simplex-noise';
-import { WORLD_SIZE, SIMULATION_CONFIG, BIOMES, GENE_DEFINITIONS } from './Constants.js';
+import { WORLD_SIZE, SIMULATION_CONFIG, BIOMES, GENE_DEFINITIONS, DEFAULT_GENE_WEIGHTS, WEIGHT_MUTATION } from './Constants.js';
 
 // Worker state
 let creatures = [];
@@ -128,71 +128,142 @@ function getCurrentAt(x, z, terrainHeight) {
   return { x: currentX * strength, z: currentZ * strength };
 }
 
-// Gene class (simplified for worker)
-class Gene {
-  constructor(name, value = Math.random()) {
-    this.name = name;
-    this.value = Math.max(0, Math.min(1, value));
-  }
-
-  mutate() {
-    const u = 1 - Math.random();
-    const v = Math.random();
-    const z = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
-    const mutationAmount = z * 0.1;
-    this.value = Math.max(0, Math.min(1, this.value + mutationAmount));
-  }
-
-  clone() {
-    return new Gene(this.name, this.value);
-  }
+// Helper: Gaussian random number
+function gaussianRandom() {
+  const u = 1 - Math.random();
+  const v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
 
-// DNA class for worker
+// Deep clone an object
+function deepClone(obj) {
+  if (obj === null || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) return obj.map(deepClone);
+  const cloned = {};
+  for (const key in obj) {
+    cloned[key] = deepClone(obj[key]);
+  }
+  return cloned;
+}
+
+// DNA class - carries both gene values and weight matrices
 class DNA {
-  constructor(genes = {}) {
+  constructor(genes = null, weights = null) {
+    // Gene values (0-1 range)
     this.genes = {};
     Object.keys(GENE_DEFINITIONS).forEach(key => {
-      if (genes[key]) {
-        this.genes[key] = new Gene(key, genes[key].value);
+      if (genes && genes[key] !== undefined) {
+        // Accept either {value: x} or just x
+        const val = typeof genes[key] === 'object' ? genes[key].value : genes[key];
+        this.genes[key] = Math.max(0, Math.min(1, val));
       } else {
-        this.genes[key] = new Gene(key);
+        this.genes[key] = 0; // Start at 0 - blind filter feeders
       }
     });
+
+    // Weight matrix - each creature carries its own copy
+    this.weights = weights ? deepClone(weights) : deepClone(DEFAULT_GENE_WEIGHTS);
   }
 
-  mutate() {
+  // Mutate gene values
+  mutateGenes() {
     if (Math.random() < SIMULATION_CONFIG.mutationRate) {
       const geneKeys = Object.keys(this.genes);
       const numMutations = Math.floor(Math.random() * SIMULATION_CONFIG.mutationAmount) + 1;
       for (let i = 0; i < numMutations; i++) {
         const randomKey = geneKeys[Math.floor(Math.random() * geneKeys.length)];
-        this.genes[randomKey].mutate();
+        const currentVal = this.genes[randomKey];
+
+        // Use absolute mutation amount (not relative to current value)
+        // This allows genes at 0 to increase
+        let mutation = gaussianRandom() * 0.1;
+
+        // Slight bias toward increasing when value is very low
+        // This helps evolution get started from zero
+        if (currentVal < 0.1 && Math.random() < 0.3) {
+          mutation = Math.abs(mutation);
+        }
+
+        this.genes[randomKey] = Math.max(0, Math.min(1, currentVal + mutation));
       }
       return true;
     }
     return false;
   }
 
+  // Mutate weight matrix values
+  mutateWeights() {
+    if (Math.random() < WEIGHT_MUTATION.chance) {
+      // Pick a random weight category and key to mutate
+      const categories = Object.keys(this.weights);
+      const category = categories[Math.floor(Math.random() * categories.length)];
+      const weightObj = this.weights[category];
+
+      if (typeof weightObj === 'object') {
+        const keys = Object.keys(weightObj);
+        const key = keys[Math.floor(Math.random() * keys.length)];
+        const subObj = weightObj[key];
+
+        if (typeof subObj === 'object') {
+          // Nested object (like senseRanges.sight.land)
+          const subKeys = Object.keys(subObj);
+          const subKey = subKeys[Math.floor(Math.random() * subKeys.length)];
+          const current = subObj[subKey];
+          const defaultVal = DEFAULT_GENE_WEIGHTS[category][key][subKey];
+          const mutation = gaussianRandom() * WEIGHT_MUTATION.amount * defaultVal;
+          subObj[subKey] = Math.max(
+            WEIGHT_MUTATION.minValue,
+            Math.min(defaultVal * WEIGHT_MUTATION.maxValue, current + mutation)
+          );
+        } else if (typeof subObj === 'number') {
+          // Direct number (like energyCosts.size)
+          const defaultVal = DEFAULT_GENE_WEIGHTS[category][key];
+          const mutation = gaussianRandom() * WEIGHT_MUTATION.amount * defaultVal;
+          weightObj[key] = Math.max(
+            WEIGHT_MUTATION.minValue,
+            Math.min(defaultVal * WEIGHT_MUTATION.maxValue, subObj + mutation)
+          );
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+
+  mutate() {
+    const genesMutated = this.mutateGenes();
+    const weightsMutated = this.mutateWeights();
+    return genesMutated || weightsMutated;
+  }
+
   clone() {
-    const newGenes = {};
-    Object.keys(this.genes).forEach(key => {
-      newGenes[key] = this.genes[key].clone();
-    });
-    return new DNA(newGenes);
+    return new DNA(deepClone(this.genes), deepClone(this.weights));
   }
 
   getGene(key) {
-    return this.genes[key] ? this.genes[key].value : 0;
+    return this.genes[key] !== undefined ? this.genes[key] : 0;
+  }
+
+  getWeight(path) {
+    // path like "energyCosts.size" or "senseRanges.sight.land"
+    const parts = path.split('.');
+    let val = this.weights;
+    for (const part of parts) {
+      if (val && val[part] !== undefined) {
+        val = val[part];
+      } else {
+        return 0;
+      }
+    }
+    return val;
   }
 
   // Serialize for transfer
   toData() {
-    const data = {};
-    Object.keys(this.genes).forEach(key => {
-      data[key] = this.genes[key].value;
-    });
-    return data;
+    return {
+      genes: deepClone(this.genes),
+      weights: deepClone(this.weights)
+    };
   }
 }
 
@@ -209,45 +280,107 @@ class WorkerCreature {
     this.age = 0;
     this.dead = false;
     this.generation = 0;
-    this.mature = false;  // Whether creature has finished developing
-    this.developmentProgress = 0;  // 0-1 progress to maturity
+    this.mature = false;
+    this.developmentProgress = 0;
 
-    this.updateFromGenes();
-
-    // Calculate max age based on genetics (trade-off: bigger/more complex = shorter lived)
-    // Base lifespan 60-120 seconds, modified by size and complexity
-    const complexity = (this.armor + this.toxicity + this.coldResistance +
-                       this.heatResistance + this.limbs + this.jaws) / 6;
-    this.maxAge = 60 + Math.random() * 60;
-    this.maxAge *= (1 - this.size * 0.3);  // Bigger = shorter life
-    this.maxAge *= (1 - complexity * 0.2);  // More complex = shorter life
-    this.maxAge *= (1 + this.metabolicEfficiency * 0.5);  // Efficiency = longer life
-    this.maxAge = Math.max(30, this.maxAge);  // Minimum 30 seconds
+    this.cacheGeneValues();
+    this.calculateMaxAge();
   }
 
-  updateFromGenes() {
-    this.size = this.dna.getGene('size');
-    this.speed = this.dna.getGene('speed');
-    this.senseRadius = this.dna.getGene('senseRadius');
-    this.camouflage = this.dna.getGene('camouflage');
-    this.armor = this.dna.getGene('armor');
-    this.metabolicEfficiency = this.dna.getGene('metabolicEfficiency');
-    this.toxicity = this.dna.getGene('toxicity');
-    this.coldResistance = this.dna.getGene('coldResistance');
-    this.heatResistance = this.dna.getGene('heatResistance');
-    this.lungCapacity = this.dna.getGene('lungCapacity');
-    this.scavenging = this.dna.getGene('scavenging');
-    this.parasitic = this.dna.getGene('parasitic');
-    this.reproductionUrgency = this.dna.getGene('reproductionUrgency');
-    this.maneuverability = this.dna.getGene('maneuverability');
-    this.predatory = this.dna.getGene('predatory');
-    this.limbs = this.dna.getGene('limbs');
-    this.jaws = this.dna.getGene('jaws');
+  // Cache gene values for quick access
+  cacheGeneValues() {
+    const g = this.dna.genes;
+    this.size = g.size || 0;
+    this.speed = g.speed || 0;
+    this.sight = g.sight || 0;
+    this.smell = g.smell || 0;
+    this.hearing = g.hearing || 0;
+    this.camouflage = g.camouflage || 0;
+    this.armor = g.armor || 0;
+    this.metabolicEfficiency = g.metabolicEfficiency || 0;
+    this.toxicity = g.toxicity || 0;
+    this.coldResistance = g.coldResistance || 0;
+    this.heatResistance = g.heatResistance || 0;
+    this.lungCapacity = g.lungCapacity || 0;
+    this.scavenging = g.scavenging || 0;
+    this.parasitic = g.parasitic || 0;
+    this.reproductionUrgency = g.reproductionUrgency || 0;
+    this.maneuverability = g.maneuverability || 0;
+    this.predatory = g.predatory || 0;
+    this.limbs = g.limbs || 0;
+    this.jaws = g.jaws || 0;
+    this.filterFeeding = g.filterFeeding || 0;
 
-    // Much slower speeds - creatures should mostly drift with currents
-    this.maxSpeed = 0.1 + (this.speed * 0.3);  // Max speed 0.1 to 0.4
-    this.maxForce = 0.01 + (this.maneuverability * 0.02);  // Very weak self-propulsion
+    // Calculate derived stats using weights
+    const w = this.dna.weights.movement;
+    this.maxSpeed = w.maxSpeedBase + (this.speed * w.maxSpeedFromSpeed);
+    this.maxForce = w.maxForceBase + (this.maneuverability * w.maxForceFromManeuver);
     this.mass = 1 + (this.size * 5) + (this.armor * 2);
+  }
+
+  calculateMaxAge() {
+    const w = this.dna.weights.lifespan;
+    const complexity = (this.armor + this.toxicity + this.coldResistance +
+                       this.heatResistance + this.limbs + this.jaws) / 6;
+    this.maxAge = w.base + Math.random() * w.random;
+    this.maxAge *= (1 - this.size * w.sizePenalty);
+    this.maxAge *= (1 - complexity * w.complexityPenalty);
+    this.maxAge *= (1 + this.metabolicEfficiency * w.efficiencyBonus);
+    this.maxAge = Math.max(30, this.maxAge);
+  }
+
+  // Calculate sense range using weight matrix
+  getSenseRange(isInWater, waterDepth) {
+    let range = 5;  // Base range
+    const sr = this.dna.weights.senseRanges;
+
+    // Sight - varies by environment
+    if (isInWater) {
+      if (waterDepth < 5) {
+        range += this.sight * sr.sight.shallowWater;
+      } else if (waterDepth < 15) {
+        range += this.sight * sr.sight.mediumWater;
+      } else {
+        range += this.sight * sr.sight.deepWater;
+      }
+    } else {
+      range += this.sight * sr.sight.land;
+    }
+
+    // Smell - works everywhere
+    range += this.smell * sr.smell.base;
+
+    // Hearing - best in water
+    if (isInWater) {
+      range += this.hearing * sr.hearing.water;
+    } else {
+      range += this.hearing * sr.hearing.land;
+    }
+
+    return range;
+  }
+
+  // Detection with camouflage consideration
+  canDetect(target, distance, isInWater, waterDepth) {
+    const senseRange = this.getSenseRange(isInWater, waterDepth);
+    if (distance > senseRange) return false;
+
+    // Calculate sense contributions
+    const sightContribution = isInWater ?
+      (waterDepth < 10 ? this.sight * 0.5 : this.sight * 0.1) :
+      this.sight * 0.6;
+    const smellContribution = this.smell * 0.3;
+    const hearingContribution = isInWater ? this.hearing * 0.4 : this.hearing * 0.1;
+    const totalSense = sightContribution + smellContribution + hearingContribution;
+
+    let detectionChance = 1.0;
+    if (totalSense > 0) {
+      const camoEffect = target.camouflage * (sightContribution / totalSense);
+      detectionChance = 1.0 - (camoEffect * 0.7);
+    }
+    detectionChance *= (1.0 - (distance / senseRange) * 0.5);
+
+    return Math.random() < detectionChance;
   }
 
   update(dt, biome) {
@@ -255,33 +388,25 @@ class WorkerCreature {
 
     this.age += dt;
 
-    // Check for death by old age
     if (this.age >= this.maxAge) {
       this.dead = true;
       this.causeOfDeath = 'old_age';
       return null;
     }
 
-    // Feature Development Costs (creatures must spend energy to develop their features)
-    // This happens during the first part of life
+    const w = this.dna.weights;
+
+    // Development costs
     if (!this.mature) {
-      const maturityTime = 10;  // Seconds to fully mature
+      const maturityTime = 10;
       this.developmentProgress = Math.min(1, this.age / maturityTime);
 
-      // Calculate total development cost based on genetic complexity
-      const featureCosts = {
-        size: this.size * 30,
-        armor: this.armor * 25,
-        toxicity: this.toxicity * 20,
-        coldResistance: this.coldResistance * 15,
-        heatResistance: this.heatResistance * 15,
-        limbs: this.limbs * 25,
-        jaws: this.jaws * 30,
-        senseRadius: this.senseRadius * 10,
-        speed: this.speed * 15
-      };
-
-      const totalDevCost = Object.values(featureCosts).reduce((a, b) => a + b, 0);
+      let totalDevCost = 0;
+      const devCosts = w.developmentCosts;
+      for (const gene in devCosts) {
+        const geneVal = this.dna.genes[gene] || 0;
+        totalDevCost += geneVal * devCosts[gene];
+      }
       const devCostPerSecond = totalDevCost / maturityTime;
 
       if (this.developmentProgress < 1) {
@@ -291,64 +416,62 @@ class WorkerCreature {
       }
     }
 
-    // Metabolic Cost - ongoing maintenance
-    let basalCost = 0.08 * (1 + this.size * 2);  // Bigger = more expensive
+    // Metabolic costs using weight matrix
+    let basalCost = 0.05 * (1 + this.size * 1.5);
     basalCost *= (1 - this.metabolicEfficiency * 0.5);
-    basalCost *= (1 + this.predatory * 0.3);  // Predatory lifestyle costs energy
-    basalCost *= (1 + this.jaws * 0.2);  // Jaws maintenance
 
-    // Feature maintenance costs (ongoing cost to maintain developed features)
-    const maintenanceCost = (
-      this.armor * 0.02 +
-      this.toxicity * 0.03 +
-      this.coldResistance * 0.01 +
-      this.heatResistance * 0.01 +
-      this.limbs * 0.02 +
-      this.camouflage * 0.01
-    );
+    // Feature maintenance using weights
+    let maintenanceCost = 0;
+    const ec = w.energyCosts;
+    for (const gene in ec) {
+      const geneVal = this.dna.genes[gene] || 0;
+      maintenanceCost += geneVal * ec[gene];
+    }
 
+    // Temperature cost
     const temp = biome ? biome.temp : 20;
     let tempCost = 0;
-
     if (temp < 10) {
       tempCost = (10 - temp) * 0.03 * (1 - this.coldResistance);
     } else if (temp > 30) {
       tempCost = (temp - 30) * 0.03 * (1 - this.heatResistance);
     }
 
+    // Movement cost
     const speed = Math.sqrt(this.velocity.x ** 2 + this.velocity.y ** 2 + this.velocity.z ** 2);
     let moveCost = speed * speed * 0.08;
     moveCost *= (1 + this.speed * 1.5);
 
     if (this.position.y < 0) {
-      moveCost *= (1 + this.limbs * 0.5);  // Limbs create drag in water
+      moveCost *= (1 + this.limbs * w.movement.limbsWaterDrag);
     } else {
-      moveCost *= (1 - this.limbs * 0.3);  // Limbs help on land
+      moveCost *= (1 - this.limbs * w.movement.limbsLandBonus);
     }
 
-    const brainCost = this.senseRadius * 0.03;
-    const totalCost = (basalCost + moveCost + brainCost + tempCost + maintenanceCost) * dt;
+    const totalCost = (basalCost + moveCost + tempCost + maintenanceCost) * dt;
     this.energy -= totalCost;
 
-    // Filter Feeding - passive energy gain in water for non-predatory creatures
-    if (this.position.y < 0 && speed < 0.3 && this.predatory < 0.5) {
-      const filterGain = 0.15 * dt * (1 + this.senseRadius * 0.3) * (1 - this.predatory);
+    // Filter Feeding - primary food source for primitive creatures
+    const ff = w.filterFeeding;
+    if (this.position.y < 0 && speed < ff.maxSpeed) {
+      const filterGain = ff.baseGain * dt *
+        (1 + this.filterFeeding * ff.filterFeedingMultiplier) *
+        (1 + this.smell * ff.smellBonus) *
+        (1 - this.predatory * 0.5);
       this.energy += filterGain;
     }
 
-    // Death by starvation
     if (this.energy <= 0) {
       this.dead = true;
       this.causeOfDeath = 'starvation';
       return null;
     }
 
-    // Movement
+    // Movement physics
     this.velocity.x += this.acceleration.x;
     this.velocity.y += this.acceleration.y;
     this.velocity.z += this.acceleration.z;
 
-    // Clamp velocity (immature creatures move slower)
     let effectiveMaxSpeed = this.maxSpeed;
     if (!this.mature) {
       effectiveMaxSpeed *= 0.5 + this.developmentProgress * 0.5;
@@ -362,24 +485,19 @@ class WorkerCreature {
       this.velocity.z *= scale;
     }
 
-    // Calculate new position
     const newX = this.position.x + this.velocity.x;
     const newY = this.position.y + this.velocity.y;
     const newZ = this.position.z + this.velocity.z;
 
-    // Get terrain at new position
     const newTerrainHeight = getTerrainHeight(newX, newZ);
     const newMinY = newTerrainHeight + this.size;
 
-    // Simple terrain collision - creature cannot go below terrain
     if (newY < newMinY) {
-      // Would hit terrain floor - slide along it
       this.position.x = newX;
       this.position.z = newZ;
       this.position.y = newMinY;
       if (this.velocity.y < 0) this.velocity.y = 0;
     } else {
-      // Free movement
       this.position.x = newX;
       this.position.y = newY;
       this.position.z = newZ;
@@ -387,9 +505,10 @@ class WorkerCreature {
 
     this.acceleration = { x: 0, y: 0, z: 0 };
 
-    // Reproduction - only mature creatures can reproduce
-    if (this.mature && this.energy > 80) {
-      const threshold = 80 + 40 * (1 - this.reproductionUrgency);
+    // Reproduction using weights
+    const rep = w.reproduction;
+    if (this.mature && this.energy > rep.energyThresholdBase) {
+      const threshold = rep.energyThresholdBase + rep.energyThresholdRange * (1 - this.reproductionUrgency);
       if (this.energy > threshold) {
         return this.reproduce();
       }
@@ -397,74 +516,68 @@ class WorkerCreature {
     return null;
   }
 
-  // Try to attack another creature
+  // Combat using weight matrix
   attack(target) {
     if (!this.mature || this.predatory < 0.3 || this.jaws < 0.2) {
-      return false;  // Can't hunt without predatory instinct and jaws
+      return false;
     }
 
-    // Attack power based on size, jaws, and predatory instinct
-    const attackPower = (this.size * 20 + this.jaws * 30 + this.predatory * 20);
+    const cw = this.dna.weights.combat;
+    const attackPower = (
+      this.size * cw.attackPower.size +
+      this.jaws * cw.attackPower.jaws +
+      this.predatory * cw.attackPower.predatory
+    );
+    const defensePower = (
+      target.size * cw.defensePower.size +
+      target.armor * cw.defensePower.armor
+    );
 
-    // Defense power based on size and armor
-    const defensePower = (target.size * 15 + target.armor * 40);
-
-    // Toxicity acts as defense
+    // Toxicity defense
     if (target.toxicity > 0.3) {
-      // Attacker takes damage from toxicity
-      const toxicDamage = target.toxicity * 30;
+      const toxicDamage = target.toxicity * cw.toxicDamage;
       this.energy -= toxicDamage;
     }
 
-    // Success chance based on attack vs defense
     const successChance = attackPower / (attackPower + defensePower);
 
     if (Math.random() < successChance) {
-      // Successful attack
       const damage = attackPower * (0.5 + Math.random() * 0.5);
       target.energy -= damage;
-
-      // Predator gains some energy from the attack (meat)
       const energyGain = damage * 0.5 * (1 + this.jaws * 0.5);
       this.energy += energyGain;
-
-      // Hunting costs energy
       this.energy -= 5;
 
       if (target.energy <= 0) {
         target.dead = true;
         target.causeOfDeath = 'predation';
-        return true;  // Kill confirmed
+        return true;
       }
     } else {
-      // Failed attack still costs energy
       this.energy -= 3;
     }
 
     return false;
   }
 
-  // Eat from a corpse (scavenging)
   scavenge(corpse) {
-    // Scavenging efficiency determines how much energy gained
     const baseGain = Math.min(corpse.energy, 20);
-    let efficiency = 0.3 + this.scavenging * 0.7;  // 30-100% efficiency
+    let efficiency = 0.3 + this.scavenging * 0.7;
 
-    // Toxic corpses hurt non-resistant creatures
     if (corpse.toxicity > 0.3 && this.toxicity < corpse.toxicity) {
-      const toxicDamage = (corpse.toxicity - this.toxicity) * 15;
+      const toxicDamage = (corpse.toxicity - this.toxicity) * this.dna.weights.combat.toxicDamage * 0.5;
       this.energy -= toxicDamage;
     }
 
     const energyGained = baseGain * efficiency;
     this.energy += energyGained;
     corpse.energy -= baseGain;
-
     return baseGain;
   }
 
   reproduce() {
-    this.energy /= 2;
+    const rep = this.dna.weights.reproduction;
+    this.energy *= rep.offspringEnergyRatio;
     const offspringDNA = this.dna.clone();
     offspringDNA.mutate();
 
@@ -517,6 +630,10 @@ class WorkerCreature {
       predatory: this.predatory,
       scavenging: this.scavenging,
       lungCapacity: this.lungCapacity,
+      sight: this.sight,
+      smell: this.smell,
+      hearing: this.hearing,
+      filterFeeding: this.filterFeeding,
       dna: this.dna.toData()
     };
   }
@@ -743,9 +860,10 @@ function initPopulation() {
       // Land plants sit on the terrain surface
       y = terrainH + 0.5;
     } else {
-      // Water plants float between terrain and water surface
+      // Water plants stay in the lower portion of water column (where creatures swim)
       const waterDepth = Math.abs(terrainH);
-      y = terrainH + 0.5 + Math.random() * Math.max(0, waterDepth - 1);
+      // Plants grow in bottom 40% of water column, same zone as creatures
+      y = terrainH + 0.5 + Math.random() * Math.min(waterDepth * 0.4, 5);
     }
 
     const plant = new WorkerPlant({ x, y, z }, nextPlantId++, isOnLand);
@@ -754,24 +872,58 @@ function initPopulation() {
   }
 
   // Spawn creatures in deep water (z < -200)
+  // Start as blind, simple filter feeders - like early life forms
   for (let i = 0; i < SIMULATION_CONFIG.initialPopulation; i++) {
     const x = (Math.random() - 0.5) * WORLD_SIZE.width * 0.8;
     const z = -200 - Math.random() * 250;  // Deep water zone
     const terrainHeight = getTerrainHeight(x, z);
     const y = terrainHeight + 2 + Math.random() * 10;  // Above terrain, in water
 
-    // Start with simple, low-cost creatures for better survival
-    const dna = new DNA();
-    dna.genes.size.value = 0.2 + Math.random() * 0.2;  // Small
-    dna.genes.speed.value = 0.2 + Math.random() * 0.2;  // Slow
-    dna.genes.armor.value = 0.1 + Math.random() * 0.2;  // Light armor
-    dna.genes.metabolicEfficiency.value = 0.5 + Math.random() * 0.3;  // Efficient
-    dna.genes.senseRadius.value = 0.3 + Math.random() * 0.2;
-    dna.genes.predatory.value = Math.random() * 0.3;  // Mostly non-predatory
-    dna.genes.scavenging.value = Math.random() * 0.5;
+    // Create blind filter feeders - all genes start near zero
+    // They will evolve everything from scratch
+    const initialGenes = {
+      // Tiny size, no speed - just float with currents
+      size: 0.05 + Math.random() * 0.1,
+      speed: Math.random() * 0.05,
 
+      // Blind - no sight, minimal smell (chemical detection), no hearing
+      sight: 0,
+      smell: 0.1 + Math.random() * 0.1,  // Basic chemical sensing for plankton
+      hearing: 0,
+
+      // No defenses
+      camouflage: 0,
+      armor: 0,
+      toxicity: 0,
+
+      // Efficient metabolism (they need to survive on filter feeding)
+      metabolicEfficiency: 0.4 + Math.random() * 0.3,
+
+      // Temperature neutral
+      coldResistance: 0.1,
+      heatResistance: 0.1,
+
+      // Water-only - no lungs or limbs
+      lungCapacity: 0,
+      limbs: 0,
+
+      // No complex behaviors
+      jaws: 0,
+      predatory: 0,
+      scavenging: 0.2 + Math.random() * 0.2,  // Can eat nearby corpses
+      parasitic: 0,
+
+      // Moderate reproduction
+      reproductionUrgency: 0.3 + Math.random() * 0.3,
+      maneuverability: Math.random() * 0.1,
+
+      // Primary food source - filter feeding!
+      filterFeeding: 0.5 + Math.random() * 0.3
+    };
+
+    const dna = new DNA(initialGenes);
     const creature = new WorkerCreature(dna, { x, y, z }, nextCreatureId++);
-    creature.energy = 150;  // Start with extra energy
+    creature.energy = 150;  // Modest starting energy
     creatures.push(creature);
   }
 }
@@ -858,18 +1010,19 @@ function update(dt) {
 
     if (isInWater) {
       // WATER PHYSICS
-      // Neutral buoyancy - stay in the middle of the water column
+      // Creatures should stay near the bottom/mid where plants are
       const waterDepth = Math.abs(terrainHeight);  // How deep the water is here
-      const midWaterY = terrainHeight + waterDepth / 2;  // Middle of water column
-      const targetY = Math.max(terrainHeight + c.size + 1, Math.min(-1, midWaterY));
+      // Target lower in water column where plants grow (bottom third)
+      const targetY = terrainHeight + Math.min(waterDepth * 0.4, 5) + c.size;
       const depthError = targetY - c.position.y;
 
-      c.velocity.y += depthError * 0.02;
-      c.velocity.y *= 0.9;
+      // Gentle buoyancy adjustment
+      c.velocity.y += depthError * 0.03;
+      c.velocity.y *= 0.85;
 
-      // Resist breaking the surface
-      if (c.position.y > -1 && c.velocity.y > 0) {
-        c.velocity.y *= 0.5;
+      // Keep below water surface
+      if (c.position.y > -1) {
+        c.velocity.y -= 0.05;
       }
 
       // Water drag - high drag makes creatures slow down quickly
@@ -877,13 +1030,14 @@ function update(dt) {
       c.velocity.y *= 0.95;
       c.velocity.z *= 0.95;
 
-      // Current - this is the dominant movement force for most creatures
-      // Creatures drift with current unless they have high speed/maneuverability
+      // Current - directly moves creatures (same as plants for consistency)
+      // Creatures drift with current unless they have high speed to resist
       const current = getCurrentAt(c.position.x, c.position.z, terrainHeight);
       const currentResistance = c.speed * 0.5; // Higher speed = resist current more
       const currentInfluence = 1.0 - currentResistance;
-      c.velocity.x += current.x * 0.5 * currentInfluence;  // Current pushes creatures
-      c.velocity.z += current.z * 0.5 * currentInfluence;
+      // Apply current directly to position (like plants) scaled by dt
+      c.position.x += current.x * dt * 3 * currentInfluence;
+      c.position.z += current.z * dt * 3 * currentInfluence;
 
       // Creatures with high lung capacity and limbs can climb onto beach (z > -100)
       if (c.lungCapacity > 0.5 && c.limbs > 0.4 && c.position.z > -200) {
@@ -940,11 +1094,14 @@ function update(dt) {
 
     // Hunting behavior - predatory creatures seek prey
     if (c.mature && c.predatory > 0.3 && c.jaws > 0.2 && c.energy < 100) {
-      const senseRange = Math.ceil((c.senseRadius * 3));
-      const nearbyCreatures = creatureSpatialGrid.getNearby(c.position.x, c.position.z, senseRange);
+      // Calculate water depth for sense effectiveness
+      const waterDepth = isInWater ? Math.abs(terrainHeight) : 0;
+      const effectiveSenseRange = c.getSenseRange(isInWater, waterDepth);
+      const gridRange = Math.ceil(effectiveSenseRange / 50) + 1;
+      const nearbyCreatures = creatureSpatialGrid.getNearby(c.position.x, c.position.z, gridRange);
 
-      let bestPrey = null;
-      let bestScore = -Infinity;
+      // Collect valid prey targets with their scores
+      const validPrey = [];
 
       for (const target of nearbyCreatures) {
         if (target === c || target.dead) continue;
@@ -954,12 +1111,8 @@ function update(dt) {
         const dz = target.position.z - c.position.z;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-        // Check if within sense range
-        const actualSenseRange = 10 + c.senseRadius * 40;
-        if (dist > actualSenseRange) continue;
-
-        // Camouflage reduces detection chance
-        if (Math.random() < target.camouflage * 0.7) continue;
+        // Use the new sense-based detection system
+        if (!c.canDetect(target, dist, isInWater, waterDepth)) continue;
 
         // Score prey: prefer smaller, weaker targets nearby
         const sizeDiff = c.size - target.size;
@@ -968,32 +1121,43 @@ function update(dt) {
         const distPenalty = dist * 0.5;
         const score = sizeDiff * 20 - armorPenalty - toxicPenalty - distPenalty + target.energy * 0.1;
 
-        if (score > bestScore) {
-          bestScore = score;
-          bestPrey = target;
+        if (score > -20) {  // Only consider viable prey
+          validPrey.push({ target, dist, score });
         }
       }
 
-      if (bestPrey) {
-        // Move towards prey (slowly)
-        const dx = bestPrey.position.x - c.position.x;
-        const dy = bestPrey.position.y - c.position.y;
-        const dz = bestPrey.position.z - c.position.z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      // Pick from top prey candidates (not always the absolute best)
+      let targetPrey = null;
+      let targetDist = 0;
 
-        if (dist > 0) {
+      if (validPrey.length > 0) {
+        // Sort by score, pick randomly from top 3
+        validPrey.sort((a, b) => b.score - a.score);
+        const pickFrom = Math.min(3, validPrey.length);
+        const picked = validPrey[Math.floor(Math.random() * pickFrom)];
+        targetPrey = picked.target;
+        targetDist = picked.dist;
+      }
+
+      if (targetPrey) {
+        // Move towards prey (slowly)
+        const dx = targetPrey.position.x - c.position.x;
+        const dy = targetPrey.position.y - c.position.y;
+        const dz = targetPrey.position.z - c.position.z;
+
+        if (targetDist > 0) {
           const huntSpeed = c.maxForce * (0.5 + c.predatory * 0.5);
-          c.acceleration.x += (dx / dist) * huntSpeed;
-          c.acceleration.y += (dy / dist) * huntSpeed * 0.3;
-          c.acceleration.z += (dz / dist) * huntSpeed;
+          c.acceleration.x += (dx / targetDist) * huntSpeed;
+          c.acceleration.y += (dy / targetDist) * huntSpeed * 0.3;
+          c.acceleration.z += (dz / targetDist) * huntSpeed;
         }
 
         // Attack if close enough
-        if (dist < 3 + c.size + bestPrey.size) {
-          const killed = c.attack(bestPrey);
+        if (targetDist < 3 + c.size + targetPrey.size) {
+          const killed = c.attack(targetPrey);
           if (killed) {
             // Create corpse from killed prey
-            const corpse = new WorkerCorpse(bestPrey, nextCorpseId++);
+            const corpse = new WorkerCorpse(targetPrey, nextCorpseId++);
             corpses.push(corpse);
             newCorpses.push(corpse.toData());
           }
@@ -1027,6 +1191,93 @@ function update(dt) {
             corpse.dead = true;
           }
         }
+      }
+    }
+
+    // Separation behavior - creatures avoid crowding each other
+    const separationRange = 5 + c.size * 3;
+    const nearbyForSeparation = creatureSpatialGrid.getNearby(c.position.x, c.position.z, 1);
+    let separationX = 0;
+    let separationZ = 0;
+    let separationCount = 0;
+
+    for (const other of nearbyForSeparation) {
+      if (other === c || other.dead) continue;
+
+      const dx = c.position.x - other.position.x;
+      const dy = c.position.y - other.position.y;
+      const dz = c.position.z - other.position.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+      if (dist < separationRange && dist > 0.1) {
+        // Push away from nearby creatures, stronger when closer
+        const strength = (separationRange - dist) / separationRange;
+        separationX += (dx / dist) * strength;
+        separationZ += (dz / dist) * strength;
+        separationCount++;
+      }
+    }
+
+    if (separationCount > 0) {
+      // Apply separation force
+      const sepForce = 0.02;
+      c.acceleration.x += separationX * sepForce;
+      c.acceleration.z += separationZ * sepForce;
+    }
+
+    // Foraging behavior - hungry creatures actively seek plants
+    if (c.energy < 120 && c.predatory < 0.7) {
+      // Use senses to find food
+      const waterDepth = isInWater ? Math.abs(terrainHeight) : 0;
+      const foodSenseRange = c.getSenseRange(isInWater, waterDepth) * 0.7; // Shorter range for food
+      const gridRange = Math.ceil(foodSenseRange / 50) + 1;
+      const nearbyPlants = spatialGrid.getNearby(c.position.x, c.position.z, gridRange);
+
+      // Collect valid plant targets instead of just finding closest
+      const validPlants = [];
+
+      for (const plant of nearbyPlants) {
+        if (plant.dead) continue;
+
+        const dx = plant.position.x - c.position.x;
+        const dy = plant.position.y - c.position.y;
+        const dz = plant.position.z - c.position.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        // Check if within sense range (smell works well for finding plants)
+        const plantDetectRange = 5 + c.smell * 30 + c.sight * (isInWater ? 10 : 20);
+        if (dist < plantDetectRange) {
+          validPlants.push({ plant, dist });
+        }
+      }
+
+      // Pick a random plant from the top candidates (not always the absolute closest)
+      let targetPlant = null;
+      let targetDist = 0;
+
+      if (validPlants.length > 0) {
+        // Sort by distance, then pick randomly from the top 3
+        validPlants.sort((a, b) => a.dist - b.dist);
+        const pickFrom = Math.min(3, validPlants.length);
+        const picked = validPlants[Math.floor(Math.random() * pickFrom)];
+        targetPlant = picked.plant;
+        targetDist = picked.dist;
+      }
+
+      // Move towards selected plant
+      if (targetPlant && targetDist > 3) {
+        const dx = targetPlant.position.x - c.position.x;
+        const dy = targetPlant.position.y - c.position.y;
+        const dz = targetPlant.position.z - c.position.z;
+        const dist = targetDist;
+
+        // Hunger increases foraging speed
+        const hungerFactor = Math.max(0.5, (120 - c.energy) / 60);
+        const forageSpeed = c.maxForce * hungerFactor;
+
+        c.acceleration.x += (dx / dist) * forageSpeed;
+        c.acceleration.y += (dy / dist) * forageSpeed * 0.2;
+        c.acceleration.z += (dz / dist) * forageSpeed;
       }
     }
 
@@ -1140,14 +1391,17 @@ function update(dt) {
         }
       }
 
-      // Keep above terrain (underwater floor)
+      // Keep plants in the lower water column where creatures swim
       const currentTerrainH = getTerrainHeight(p.position.x, p.position.z);
+      const currentWaterDepth = Math.abs(currentTerrainH);
+      const maxPlantY = currentTerrainH + Math.min(currentWaterDepth * 0.4, 5) + 1;
+
       if (p.position.y < currentTerrainH + 0.5) {
         p.position.y = currentTerrainH + 0.5;
       }
-      // Keep below water surface
-      if (p.position.y > -0.5) {
-        p.position.y = -0.5;
+      // Keep in lower portion of water column
+      if (p.position.y > maxPlantY) {
+        p.position.y = maxPlantY;
       }
     }
 
@@ -1177,9 +1431,9 @@ function update(dt) {
     if (isOnLand) {
       y = terrainH + 0.5;
     } else {
-      // Water plants float
+      // Water plants stay in the lower portion where creatures swim
       const waterDepth = Math.abs(terrainH);
-      y = terrainH + 0.5 + Math.random() * Math.max(0, waterDepth - 1);
+      y = terrainH + 0.5 + Math.random() * Math.min(waterDepth * 0.4, 5);
     }
 
     const newPlant = new WorkerPlant({ x: seedX, y, z: seedZ }, nextPlantId++, isOnLand);
@@ -1240,9 +1494,9 @@ function update(dt) {
       // Land plants sit on the terrain surface
       y = terrainH + 0.5;
     } else {
-      // Water plants float between terrain and water surface
+      // Water plants stay in the lower portion where creatures swim
       const waterDepth = Math.abs(terrainH);
-      y = terrainH + 0.5 + Math.random() * Math.max(0, waterDepth - 1);
+      y = terrainH + 0.5 + Math.random() * Math.min(waterDepth * 0.4, 5);
     }
 
     const plant = new WorkerPlant({ x, y, z }, nextPlantId++, isOnLand);
