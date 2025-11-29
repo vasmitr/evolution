@@ -72,6 +72,39 @@ function getBiomeAt(x, z) {
   return BIOMES.TUNDRA;
 }
 
+// Calculate how well a creature's color matches the environment (0-1)
+// Returns higher values when creature color matches biome colors
+function getEnvironmentCamoMatch(colorHue, biome) {
+  if (!biome) return 0.5; // Neutral if no biome
+
+  // Define ideal hue ranges for each biome (0-1 scale)
+  // Hue: 0=red, 0.08=orange, 0.17=yellow, 0.33=green, 0.5=cyan, 0.67=blue, 0.83=purple
+  const biomeHues = {
+    'Deep Water': { center: 0.6, range: 0.15 },     // Deep blue
+    'Shoals': { center: 0.55, range: 0.2 },         // Blue-green
+    'Beach': { center: 0.12, range: 0.15 },         // Tan/sandy
+    'Grassland': { center: 0.33, range: 0.15 },     // Green
+    'Desert': { center: 0.1, range: 0.12 },         // Orange/tan
+    'Tundra': { center: 0.0, range: 0.5 },          // White/gray (any desaturated works)
+  };
+
+  const hueInfo = biomeHues[biome.name];
+  if (!hueInfo) return 0.5;
+
+  // Calculate hue distance (wrapping around 0-1)
+  let hueDiff = Math.abs(colorHue - hueInfo.center);
+  if (hueDiff > 0.5) hueDiff = 1 - hueDiff; // Wrap around
+
+  // Score: 1.0 if perfect match, decreasing as hue differs
+  // Within range = good camouflage, outside range = poor
+  if (hueDiff <= hueInfo.range) {
+    return 1.0 - (hueDiff / hueInfo.range) * 0.3; // 0.7-1.0 within range
+  } else {
+    const excess = hueDiff - hueInfo.range;
+    return Math.max(0.1, 0.7 - excess * 2); // Drops quickly outside range
+  }
+}
+
 // Legacy function for compatibility
 function getBiome(y) {
   if (y < BIOMES.DEEP_WATER.heightMax) return BIOMES.DEEP_WATER;
@@ -437,7 +470,6 @@ class WorkerCreature {
     this.sight = g.sight || 0;
     this.smell = g.smell || 0;
     this.hearing = g.hearing || 0;
-    this.camouflage = g.camouflage || 0;
     this.armor = g.armor || 0;
     this.metabolicEfficiency = g.metabolicEfficiency || 0;
     this.toxicity = g.toxicity || 0;
@@ -452,6 +484,8 @@ class WorkerCreature {
     this.limbs = g.limbs || 0;
     this.jaws = g.jaws || 0;
     this.filterFeeding = g.filterFeeding || 0;
+    this.colorHue = g.colorHue || 0.33; // Default to green
+    this.colorSaturation = g.colorSaturation || 0.5;
 
     // Calculate derived stats using weights
     const w = this.dna.weights.movement;
@@ -502,7 +536,8 @@ class WorkerCreature {
     return range;
   }
 
-  // Detection with camouflage consideration
+  // Detection based on color matching environment
+  // Creatures with colors matching their biome are harder to spot (but never invisible)
   canDetect(target, distance, isInWater, waterDepth) {
     const senseRange = this.getSenseRange(isInWater, waterDepth);
     if (distance > senseRange) return false;
@@ -516,11 +551,22 @@ class WorkerCreature {
     const totalSense = sightContribution + smellContribution + hearingContribution;
 
     let detectionChance = 1.0;
-    if (totalSense > 0) {
-      const camoEffect = target.camouflage * (sightContribution / totalSense);
-      detectionChance = 1.0 - (camoEffect * 0.7);
+    if (totalSense > 0 && sightContribution > 0) {
+      // Get target's current biome and calculate color match
+      const targetBiome = getBiomeAt(target.position.x, target.position.z);
+      const targetColorHue = target.colorHue !== undefined ? target.colorHue : 0.33;
+      const colorMatch = getEnvironmentCamoMatch(targetColorHue, targetBiome);
+
+      // Color matching reduces detection, but only for sight-based detection
+      // Max 40% reduction when perfectly matched (creatures always remain somewhat visible)
+      const camoEffect = colorMatch * 0.4 * (sightContribution / totalSense);
+      detectionChance = 1.0 - camoEffect;
     }
+    // Distance also affects detection
     detectionChance *= (1.0 - (distance / senseRange) * 0.5);
+
+    // Minimum 30% detection chance - creatures are never invisible
+    detectionChance = Math.max(0.3, detectionChance);
 
     return Math.random() < detectionChance;
   }
@@ -788,6 +834,8 @@ class WorkerCreature {
       smell: this.smell,
       hearing: this.hearing,
       filterFeeding: this.filterFeeding,
+      colorHue: this.colorHue,
+      colorSaturation: this.colorSaturation,
       // Pass variativeness for visual limb type (fins/legs/claws)
       limbsVariativeness: this.dna.variativeness.limbs,
       jawsVariativeness: this.dna.variativeness.jaws,
@@ -1053,9 +1101,12 @@ function initPopulation() {
       hearing: 0,
 
       // No defenses
-      camouflage: 0,
       armor: 0,
       toxicity: 0,
+
+      // Random color (blue-ish for water creatures)
+      colorHue: 0.5 + Math.random() * 0.2, // Blue-cyan range
+      colorSaturation: 0.3 + Math.random() * 0.3,
 
       // Efficient metabolism (they need to survive on filter feeding)
       metabolicEfficiency: 0.4 + Math.random() * 0.3,

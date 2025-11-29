@@ -28,7 +28,6 @@ export class Creature {
     this.size = this.dna.getGene('size');
     this.speed = this.dna.getGene('speed');
     this.senseRadius = this.dna.getGene('senseRadius');
-    this.camouflage = this.dna.getGene('camouflage');
     this.armor = this.dna.getGene('armor');
     this.metabolicEfficiency = this.dna.getGene('metabolicEfficiency');
     this.toxicity = this.dna.getGene('toxicity');
@@ -72,31 +71,25 @@ export class Creature {
       lengthRatio * baseScale
     );
     
-    // Update color based on phenotype appearance
+    // Update color based on color genes (freely evolvable)
     if (this.bodyMesh) {
-      const appearance = this.phenotype.appearance;
-      
-      if (appearance.toxicityIntensity > 0.5) {
-        // Toxic creatures: bright warning colors
-        // High variativeness = more vibrant/varied hues
-        const hue = appearance.toxicityHue * 0.15; // 0-0.15 (red to yellow range)
-        const saturation = 0.8 + appearance.toxicityHue * 0.2;
-        const lightness = 0.4 + appearance.toxicityHue * 0.2;
-        this.bodyMesh.material.color.setHSL(hue, saturation, lightness);
-      } else if (appearance.camouflageStrength > 0.5) {
-        // Camouflaged creatures: earth tones
-        // High variativeness = more complex/varied patterns (shown as hue variation)
-        const hue = 0.1 + appearance.patternComplexity * 0.2; // Green-brown range
-        const saturation = 0.3 + appearance.patternComplexity * 0.3;
-        const lightness = 0.3 + appearance.patternComplexity * 0.3;
-        this.bodyMesh.material.color.setHSL(hue, saturation, lightness);
-      } else {
-        // Default: varied natural colors
-        const hue = 0.5 + (this.maneuverability * 0.3); // Blue-green range
-        const saturation = 0.4 + (this.speed * 0.3);
-        const lightness = 0.4 + (this.metabolicEfficiency * 0.2);
-        this.bodyMesh.material.color.setHSL(hue, saturation, lightness);
+      // Get color genes - these can mutate freely
+      const colorHue = this.dna.getGene('colorHue');
+      const colorSaturation = this.dna.getGene('colorSaturation');
+
+      // Base color from genes
+      const hue = colorHue; // Full spectrum 0-1
+      let saturation = 0.3 + colorSaturation * 0.5; // 0.3-0.8
+      let lightness = 0.35 + colorSaturation * 0.15; // 0.35-0.5
+
+      // Toxic creatures get brighter, more saturated colors (warning coloration)
+      // This is biologically meaningful - bright colors warn predators (aposematism)
+      if (this.toxicity > 0.4) {
+        saturation = Math.min(saturation + this.toxicity * 0.3, 1.0);
+        lightness = Math.min(lightness + this.toxicity * 0.2, 0.6);
       }
+
+      this.bodyMesh.material.color.setHSL(hue, saturation, lightness);
     }
     
     this.updateVisuals();
@@ -117,9 +110,10 @@ export class Creature {
     const smellGene = this.dna.genes.smell;
     const sizeGene = this.dna.genes.size;
     const toxicityGene = this.dna.genes.toxicity;
-    const camouflageGene = this.dna.genes.camouflage;
     const metabolicGene = this.dna.genes.metabolicEfficiency;
     const predatoryGene = this.dna.genes.predatory;
+    const colorHueGene = this.dna.genes.colorHue;
+    const colorSatGene = this.dna.genes.colorSaturation;
     
     // Limb characteristics
     phenotype.limbs = {
@@ -182,9 +176,9 @@ export class Creature {
       // Toxicity affects color intensity
       toxicityHue: toxicityGene.variativeness, // High = bright warning colors
       toxicityIntensity: toxicityGene.value,
-      // Camouflage affects pattern complexity
-      patternComplexity: camouflageGene.variativeness, // High = complex patterns
-      camouflageStrength: camouflageGene.value,
+      // Color genes determine base coloration
+      colorHue: colorHueGene ? colorHueGene.value : 0.33,
+      colorSaturation: colorSatGene ? colorSatGene.value : 0.5,
     };
     
     return phenotype;

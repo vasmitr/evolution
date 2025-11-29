@@ -11,7 +11,6 @@ export const GENE_DEFINITIONS = {
   sight: { name: "Sight" },
   smell: { name: "Smell" },
   hearing: { name: "Hearing" },
-  camouflage: { name: "Camouflage" },
   armor: { name: "Armor" },
   metabolicEfficiency: { name: "Metabolism" },
   toxicity: { name: "Toxicity" },
@@ -26,6 +25,8 @@ export const GENE_DEFINITIONS = {
   limbs: { name: "Limbs" },
   jaws: { name: "Jaws" },
   filterFeeding: { name: "Filter Feed" },
+  colorHue: { name: "Color Hue" },
+  colorSaturation: { name: "Color Sat" },
 };
 
 // Default weight matrix - defines how genes affect different aspects
@@ -39,7 +40,6 @@ export const DEFAULT_GENE_WEIGHTS = {
     sight: 0.025, // Eyes are expensive
     smell: 0.008, // Smell is cheap
     hearing: 0.012, // Moderate cost
-    camouflage: 0.006, // Pigment maintenance
     armor: 0.015, // Shell maintenance
     toxicity: 0.02, // Toxin synthesis
     coldResistance: 0.008,
@@ -53,6 +53,8 @@ export const DEFAULT_GENE_WEIGHTS = {
     scavenging: 0.005, // Keen sense of decay
     maneuverability: 0.008, // Flexible body maintenance
     reproductionUrgency: 0.003, // Reproductive system readiness
+    colorHue: 0.001, // Pigment maintenance (negligible)
+    colorSaturation: 0.001, // Pigment intensity
   },
 
   // Development costs (one-time cost to grow the feature)
@@ -62,7 +64,6 @@ export const DEFAULT_GENE_WEIGHTS = {
     sight: 15,
     smell: 5,
     hearing: 10,
-    camouflage: 8,
     armor: 20,
     toxicity: 15,
     coldResistance: 10,
@@ -76,6 +77,8 @@ export const DEFAULT_GENE_WEIGHTS = {
     scavenging: 4, // Scent detection for decay
     maneuverability: 8, // Flexible body development
     reproductionUrgency: 2, // Reproductive maturation
+    colorHue: 0, // Free - just pigment
+    colorSaturation: 0, // Free - just pigment
   },
 
   // Sense effectiveness in different environments

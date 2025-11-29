@@ -99,33 +99,137 @@ class CreatureRenderer {
     this.buildArmor(data);
     this.buildSpecialFeatures(data);
     this.buildEmergentFeatures(data, bodyColor);
+    this.buildFoodHabitPattern(data);
   }
 
   getBodyColor(data) {
-    // Priority-based coloring
+    // Color is now freely determined by color genes
+    // colorHue gene: 0-1 maps to full hue spectrum
+    // colorSaturation gene: 0-1 maps to saturation
+    // Toxicity still affects brightness for warning coloration (aposematism)
+    const hue = data.colorHue || 0.33; // Default to green if gene not present
+    const baseSaturation = 0.3 + (data.colorSaturation || 0.5) * 0.5; // 0.3-0.8
+    const baseLightness = 0.35 + (data.colorSaturation || 0.5) * 0.15; // 0.35-0.5
+
+    // Toxic creatures get brighter, more saturated colors (warning coloration)
+    // This is still biologically meaningful - bright colors warn predators
+    let saturation = baseSaturation;
+    let lightness = baseLightness;
     if (data.toxicity > 0.4) {
-      return new THREE.Color(0xff3333); // Bright red = toxic warning
+      saturation = Math.min(saturation + data.toxicity * 0.3, 1.0);
+      lightness = Math.min(lightness + data.toxicity * 0.2, 0.6);
     }
+
+    return new THREE.Color().setHSL(hue, saturation, lightness);
+  }
+
+  // Get pattern color for food habit markings
+  getFoodHabitPattern(data) {
+    // Determine dominant food habit
     if (data.predatory > 0.4) {
-      return new THREE.Color(0xdd6622); // Orange = predator
+      return { type: 'stripes', color: 0xcc2222 }; // Red stripes for predators
     }
     if (data.parasitic > 0.3) {
-      return new THREE.Color(0x9944aa); // Purple = parasite
+      return { type: 'spots', color: 0x9944aa }; // Purple spots for parasites
     }
     if (data.scavenging > 0.4) {
-      return new THREE.Color(0x886644); // Brown = scavenger
+      return { type: 'patches', color: 0x886644 }; // Brown patches for scavengers
     }
-    if (data.coldResistance > 0.4) {
-      return new THREE.Color(0x88aacc); // Blue-gray = cold adapted
+    if (data.filterFeeding > 0.4) {
+      return { type: 'rings', color: 0x4488cc }; // Blue rings for filter feeders
     }
-    if (data.heatResistance > 0.4) {
-      return new THREE.Color(0xcc8844); // Tan = heat adapted
+    // Herbivores - no pattern (or subtle green)
+    return null;
+  }
+
+  buildFoodHabitPattern(data) {
+    const pattern = this.getFoodHabitPattern(data);
+    if (!pattern) return;
+
+    this.patternGroup = new THREE.Group();
+    const patternMat = new THREE.MeshStandardMaterial({
+      color: pattern.color,
+      roughness: 0.5,
+      metalness: 0.0
+    });
+
+    if (pattern.type === 'stripes') {
+      // Vertical stripes along the body (like a tiger/wasp)
+      const stripeCount = 3 + Math.floor(data.predatory * 4); // 3-7 stripes
+      for (let i = 0; i < stripeCount; i++) {
+        const t = (i / (stripeCount - 1)) - 0.5; // -0.5 to 0.5
+        const zPos = t * 1.4; // Spread along body length
+
+        // Create a ring/band around the body
+        const stripeGeo = new THREE.TorusGeometry(0.95, 0.04, 8, 16);
+        const stripe = new THREE.Mesh(stripeGeo, patternMat);
+        stripe.position.set(0, 0, zPos);
+        stripe.rotation.x = Math.PI / 2;
+        this.patternGroup.add(stripe);
+      }
+    } else if (pattern.type === 'spots') {
+      // Scattered spots on the body (like a leopard/poison frog)
+      const spotCount = 5 + Math.floor(data.parasitic * 8); // 5-13 spots
+      for (let i = 0; i < spotCount; i++) {
+        const spotGeo = new THREE.CircleGeometry(0.08 + Math.random() * 0.06, 8);
+        const spot = new THREE.Mesh(spotGeo, patternMat);
+
+        // Distribute on body surface
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.random() * Math.PI * 0.8 - Math.PI * 0.4;
+        const r = 1.01; // Just above body surface
+        spot.position.set(
+          Math.sin(theta) * Math.cos(phi) * r,
+          Math.sin(phi) * r,
+          Math.cos(theta) * Math.cos(phi) * r
+        );
+        spot.lookAt(0, 0, 0);
+        spot.rotateX(Math.PI); // Face outward
+        this.patternGroup.add(spot);
+      }
+    } else if (pattern.type === 'patches') {
+      // Irregular patches (like a hyena/vulture)
+      const patchCount = 3 + Math.floor(data.scavenging * 4); // 3-7 patches
+      for (let i = 0; i < patchCount; i++) {
+        // Irregular shape using deformed circle
+        const patchGeo = new THREE.CircleGeometry(0.15 + Math.random() * 0.1, 6);
+        const positions = patchGeo.attributes.position;
+        for (let j = 1; j < positions.count; j++) {
+          const x = positions.getX(j);
+          const y = positions.getY(j);
+          positions.setX(j, x * (0.7 + Math.random() * 0.6));
+          positions.setY(j, y * (0.7 + Math.random() * 0.6));
+        }
+        patchGeo.attributes.position.needsUpdate = true;
+
+        const patch = new THREE.Mesh(patchGeo, patternMat);
+
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.random() * Math.PI * 0.6 - Math.PI * 0.3;
+        const r = 1.01;
+        patch.position.set(
+          Math.sin(theta) * Math.cos(phi) * r,
+          Math.sin(phi) * r + 0.2,
+          Math.cos(theta) * Math.cos(phi) * r
+        );
+        patch.lookAt(0, 0, 0);
+        patch.rotateX(Math.PI);
+        patch.rotation.z = Math.random() * Math.PI; // Random rotation
+        this.patternGroup.add(patch);
+      }
+    } else if (pattern.type === 'rings') {
+      // Concentric rings (like a target/filter feeder appearance)
+      const ringCount = 2 + Math.floor(data.filterFeeding * 3); // 2-5 rings
+      for (let i = 0; i < ringCount; i++) {
+        const radius = 0.3 + i * 0.2;
+        const ringGeo = new THREE.TorusGeometry(radius, 0.03, 6, 24);
+        const ring = new THREE.Mesh(ringGeo, patternMat);
+        ring.position.set(0, 0, 0.5); // On the front/face
+        this.patternGroup.add(ring);
+      }
     }
-    // Default - greenish based on how "herbivore-like"
-    // HSL hue: 0.0=red, 0.33=green, 0.66=blue
-    // Low predatory = more green (hue ~0.33), high predatory = more yellow/orange (hue ~0.1)
-    const greenness = 0.33 - data.predatory * 0.2; // 0.33 (green) to 0.13 (yellow-orange)
-    return new THREE.Color().setHSL(greenness, 0.6, 0.45);
+
+    this.mesh.add(this.patternGroup);
   }
 
   buildEyes(data) {
