@@ -427,6 +427,12 @@ class WorkerCreature {
       const geneVal = this.dna.genes[gene] || 0;
       maintenanceCost += geneVal * ec[gene];
     }
+    
+    // Armor is significantly more expensive to maintain
+    if (this.armor > 0.3) {
+      const armorPenalty = this.armor * 0.15; // Up to 15% extra cost at max armor
+      maintenanceCost *= (1 + armorPenalty);
+    }
 
     // Temperature cost
     const temp = biome ? biome.temp : 20;
@@ -508,7 +514,11 @@ class WorkerCreature {
     // Reproduction using weights
     const rep = w.reproduction;
     if (this.mature && this.energy > rep.energyThresholdBase) {
-      const threshold = rep.energyThresholdBase + rep.energyThresholdRange * (1 - this.reproductionUrgency);
+      // Predators reproduce at lower energy threshold to compensate for hunting difficulty
+      let threshold = rep.energyThresholdBase + rep.energyThresholdRange * (1 - this.reproductionUrgency);
+      if (this.predatory > 0.5) {
+        threshold *= 0.7; // Predators need 30% less energy to reproduce
+      }
       if (this.energy > threshold) {
         return this.reproduce();
       }
@@ -518,7 +528,7 @@ class WorkerCreature {
 
   // Combat using weight matrix
   attack(target) {
-    if (!this.mature || this.predatory < 0.3 || this.jaws < 0.2) {
+    if (this.predatory < 0.3 || this.jaws < 0.2) {
       return false;
     }
 
@@ -544,9 +554,10 @@ class WorkerCreature {
     if (Math.random() < successChance) {
       const damage = attackPower * (0.5 + Math.random() * 0.5);
       target.energy -= damage;
-      const energyGain = damage * 0.5 * (1 + this.jaws * 0.5);
+      // Increased energy gain from successful attacks
+      const energyGain = damage * 0.8 * (1 + this.jaws * 0.5); // Was 0.5, now 0.8
       this.energy += energyGain;
-      this.energy -= 5;
+      this.energy -= 3; // Reduced attack cost from 5 to 3
 
       if (target.energy <= 0) {
         target.dead = true;
@@ -948,6 +959,13 @@ function update(dt) {
   const newCorpses = [];
   const deadCorpseIds = [];
 
+  // Track energy sources for statistics
+  const energyStats = {
+    plants: 0,
+    meat: 0,
+    filter: 0
+  };
+
   // Build creature spatial grid for hunting
   creatureSpatialGrid.clear();
   for (const c of creatures) {
@@ -1163,6 +1181,13 @@ function update(dt) {
 
       for (const target of nearbyCreatures) {
         if (target === c || target.dead) continue;
+        
+        // Predators can hunt each other if size difference is significant
+        // OR if both are predators (competition)
+        const canHuntPredator = (c.size > target.size * 1.3) || (target.predatory > 0.5 && c.predatory > 0.5);
+        
+        // Skip other predators unless we can hunt them
+        if (target.predatory > 0.5 && !canHuntPredator) continue;
 
         const dx = target.position.x - c.position.x;
         const dy = target.position.y - c.position.y;
@@ -1214,10 +1239,17 @@ function update(dt) {
         if (targetDist < 3 + c.size + targetPrey.size) {
           const killed = c.attack(targetPrey);
           if (killed) {
+            // Predator gets a big energy boost from the kill
+            const killBonus = 30 + targetPrey.size * 20;
+            c.energy += killBonus;
+            
             // Create corpse from killed prey
             const corpse = new WorkerCorpse(targetPrey, nextCorpseId++);
             corpses.push(corpse);
             newCorpses.push(corpse.toData());
+            
+            // Energy gained from kill (predator eats some immediately)
+            energyStats.meat += killBonus + 20; // Track the bonus + base
           }
         }
       }
@@ -1244,7 +1276,8 @@ function update(dt) {
 
         // Eat from corpse if close
         if (dist < 3 + c.size + corpse.size) {
-          c.scavenge(corpse);
+          const gained = c.scavenge(corpse);
+          energyStats.meat += gained * (0.3 + c.scavenging * 0.7); // Track actual energy gained
           if (corpse.energy <= 0) {
             corpse.dead = true;
           }
@@ -1312,6 +1345,7 @@ function update(dt) {
           if (drainAmount > 0 && bestHost.energy > 10) {
             bestHost.energy -= drainAmount;
             c.energy += drainAmount * 0.8; // Some energy lost in transfer
+            energyStats.meat += drainAmount * 0.8; // Parasitism counts as meat/blood
 
             // Follow host movement
             c.position.x = bestHost.position.x + (dx / bestDist) * (c.size + bestHost.size) * 0.5;
@@ -1323,11 +1357,17 @@ function update(dt) {
     }
 
     // Separation behavior - creatures avoid crowding each other
+    // ALSO: Prey creatures flee from nearby predators
     const separationRange = 5 + c.size * 3;
     const nearbyForSeparation = creatureSpatialGrid.getNearby(c.position.x, c.position.z, 1);
     let separationX = 0;
     let separationZ = 0;
     let separationCount = 0;
+    
+    // Escape behavior
+    let fleeX = 0;
+    let fleeZ = 0;
+    let fleeCount = 0;
 
     for (const other of nearbyForSeparation) {
       if (other === c || other.dead) continue;
@@ -1336,6 +1376,15 @@ function update(dt) {
       const dy = c.position.y - other.position.y;
       const dz = c.position.z - other.position.z;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      
+      // Flee from predators if you're not a predator yourself
+      if (other.predatory > 0.4 && c.predatory < 0.3 && dist < 15 + c.sight * 20) {
+        // Flee! Speed and maneuverability help escape
+        const fleeStrength = (1 + c.speed * 2 + c.maneuverability) * 2;
+        fleeX += (dx / dist) * fleeStrength;
+        fleeZ += (dz / dist) * fleeStrength;
+        fleeCount++;
+      }
 
       if (dist < separationRange && dist > 0.1) {
         // Push away from nearby creatures, stronger when closer
@@ -1344,6 +1393,13 @@ function update(dt) {
         separationZ += (dz / dist) * strength;
         separationCount++;
       }
+    }
+    
+    // Apply flee force (stronger than separation)
+    if (fleeCount > 0) {
+      const fleeForce = 0.08; // Much stronger than separation
+      c.acceleration.x += fleeX * fleeForce;
+      c.acceleration.z += fleeZ * fleeForce;
     }
 
     if (separationCount > 0) {
@@ -1489,8 +1545,8 @@ function update(dt) {
   const deadPlantIds = [];
   const newPlants = [];  // Track new plants for this frame
   const plantOffspring = [];  // Seeds from reproducing plants
-  const plantHalfWidth = WORLD_SIZE.width / 2 - 5;
-  const plantHalfDepth = WORLD_SIZE.depth / 2 - 5;
+  const plantHalfWidth = WORLD_SIZE.width / 2 - 15; // Increased from 5 to 15 to match creature bounds
+  const plantHalfDepth = WORLD_SIZE.depth / 2 - 15; // Increased from 5 to 15
 
   for (let j = plants.length - 1; j >= 0; j--) {
     const p = plants[j];
@@ -1639,8 +1695,26 @@ function update(dt) {
 
   const eatenPlantIds = [];
   for (const c of creatures) {
-    // Non-predatory or hungry creatures eat plants
-    if (c.predatory > 0.7 && c.energy > 50) continue;  // Pure predators don't eat plants unless starving
+    // Filter feeding tracking
+    if (c.filterFeeding > 0 && c.position.y < 0) {
+       // We need to know how much energy was gained from filter feeding this frame
+       // This logic is duplicated from Creature.update, but we can approximate or refactor
+       // For now, let's just use the gene value as a proxy for "potential" filter feeding
+       // Actually, let's track it properly.
+       // The creature update function handles the energy addition. 
+       // We can't easily hook into it without changing the return value of update.
+       // Let's modify the Creature.update to return stats? Or just estimate here.
+       // Estimation is easier for now.
+       const speed = Math.sqrt(c.velocity.x**2 + c.velocity.y**2 + c.velocity.z**2);
+       const ff = c.dna.weights.filterFeeding;
+       if (speed < ff.maxSpeed) {
+         const gain = ff.baseGain * dt * (1 + c.filterFeeding * ff.filterFeedingMultiplier);
+         energyStats.filter += gain;
+       }
+    }
+
+    // Predators are obligate carnivores - they cannot digest plants
+    if (c.predatory > 0.5) continue; // Predators can't eat plants
 
     const nearbyPlants = spatialGrid.getNearby(c.position.x, c.position.z, 1);
 
@@ -1663,8 +1737,12 @@ function update(dt) {
 
         // Without jaws, can only nibble - with jaws, can consume whole plant
         const consumeAmount = c.jaws > 0.2 ? p.energy : Math.min(p.energy, 10 + c.size * 5);
-        c.eat(consumeAmount * totalEfficiency);
+        const energyGained = consumeAmount * totalEfficiency;
+        
+        c.eat(energyGained);
         p.energy -= consumeAmount;
+        
+        energyStats.plants += energyGained;
 
         if (p.energy <= 0) {
           p.dead = true;
@@ -1676,6 +1754,19 @@ function update(dt) {
       }
     }
   }
+  
+  // Track meat consumption (from hunting and scavenging)
+  // We need to hook into where these happen.
+  // Since we can't easily pass the stats object into the creature methods without changing signature,
+  // we'll do it by checking energy changes or just moving the logic out?
+  // Actually, the hunting/scavenging logic is IN this function (update), so we can just add to stats there!
+  // Wait, the hunting logic is inside the creature loop above (lines 1153+).
+  // I need to find that block and add stats tracking there.
+  
+  // But I can't edit multiple non-contiguous blocks with replace_file_content.
+  // I will use multi_replace_file_content for that.
+  
+  // For this block, I'll just handle the plant eating and return data.
 
   // Density-based plant spawning - spawn in areas where plants have been eaten
   // Use a coarse grid to find low-density regions
@@ -1782,7 +1873,8 @@ function update(dt) {
       creatureCount: creatures.length,
       plantCount: plants.length,
       corpseCount: corpses.length,
-      time
+      time,
+      energySources: energyStats
     }
   };
 }

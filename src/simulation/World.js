@@ -221,20 +221,21 @@ class CreatureRenderer {
     const jawMat = new THREE.MeshStandardMaterial({ color: 0xaa2222 });
     const toothMat = new THREE.MeshStandardMaterial({ color: 0xffffee });
 
-    const jawScale = 0.8 + data.jaws * 0.6;
+    // Increased jaw scale for better visibility
+    const jawScale = 1.2 + data.jaws * 1.0; // Was 0.8 + 0.6, now 1.2 + 1.0
 
-    // Upper jaw
+    // Upper jaw - positioned more forward and visible
     const upperJaw = new THREE.Mesh(SharedGeometries.jaw, jawMat);
-    upperJaw.position.set(0, 0.06, 1.0);
+    upperJaw.position.set(0, 0.1, 1.1); // Moved up and forward
     upperJaw.scale.setScalar(jawScale);
-    upperJaw.userData.restY = 0.06;
+    upperJaw.userData.restY = 0.1;
     this.jawsGroup.add(upperJaw);
 
     // Lower jaw
     const lowerJaw = new THREE.Mesh(SharedGeometries.jaw, jawMat);
-    lowerJaw.position.set(0, -0.06, 1.0);
+    lowerJaw.position.set(0, -0.1, 1.1); // Moved down and forward
     lowerJaw.scale.setScalar(jawScale);
-    lowerJaw.userData.restY = -0.06;
+    lowerJaw.userData.restY = -0.1;
     this.jawsGroup.add(lowerJaw);
 
     // Teeth for predators with strong jaws
@@ -263,27 +264,32 @@ class CreatureRenderer {
     if (data.armor < 0.3) return;
 
     const spikeMat = new THREE.MeshStandardMaterial({
-      color: 0x555555,
-      metalness: 0.4,
-      roughness: 0.6
+      color: 0x666666, // Darker gray for better visibility
+      metalness: 0.6,
+      roughness: 0.4
     });
 
-    const spikeCount = Math.floor(3 + data.armor * 6);
+    // More spikes for better shell coverage
+    const spikeCount = Math.floor(6 + data.armor * 12); // Increased from 3-9 to 6-18
 
-    // Distribute spikes on upper body
+    // Distribute spikes evenly on upper body for shell-like appearance
     for (let i = 0; i < spikeCount; i++) {
       const spike = new THREE.Mesh(SharedGeometries.spike, spikeMat);
 
-      // Place on upper hemisphere
+      // Place on upper hemisphere in a more organized pattern
       const theta = (i / spikeCount) * Math.PI * 2;
-      const phi = 0.3 + Math.random() * 0.5;
+      const row = Math.floor(i / 6); // Create rows
+      const phi = 0.2 + (row * 0.3); // Vertical distribution
 
       spike.position.set(
-        Math.sin(phi) * Math.cos(theta) * 0.9,
-        Math.cos(phi) * 0.9,
-        Math.sin(phi) * Math.sin(theta) * 0.9
+        Math.sin(phi) * Math.cos(theta) * 1.0, // Slightly larger radius
+        Math.cos(phi) * 1.0,
+        Math.sin(phi) * Math.sin(theta) * 1.0
       );
-      spike.scale.setScalar(0.8 + data.armor * 0.6);
+      
+      // Larger, more visible spikes
+      const spikeScale = 1.2 + data.armor * 1.0; // Increased from 0.8-1.4 to 1.2-2.2
+      spike.scale.setScalar(spikeScale);
       spike.lookAt(spike.position.clone().multiplyScalar(2));
       this.armorGroup.add(spike);
     }
@@ -337,9 +343,25 @@ class CreatureRenderer {
       this.isEating = true;
       this.eatingTimer = 0.5; // Eat animation duration
     }
+    
+    // Detect attacking (energy decreased from attack cost, or predatory creature near prey)
+    if (prevData && data.predatory > 0.3) {
+      // Check if energy dropped suddenly (attack cost) but not too much (not starvation)
+      const energyDrop = prevData.energy - data.energy;
+      if (energyDrop > 2 && energyDrop < 10) {
+        this.isAttacking = true;
+        this.attackTimer = 0.3; // Quick attack animation
+      }
+    }
+    
     if (this.eatingTimer > 0) {
       this.eatingTimer -= dt;
       if (this.eatingTimer <= 0) this.isEating = false;
+    }
+    
+    if (this.attackTimer > 0) {
+      this.attackTimer -= dt;
+      if (this.attackTimer <= 0) this.isAttacking = false;
     }
 
     // Animation speed based on movement
@@ -372,26 +394,92 @@ class CreatureRenderer {
         if (child.userData.side !== undefined) {
           // This is a limb (not a foot)
           const phase = limbPhase + child.userData.pairIndex * Math.PI + (child.userData.side > 0 ? Math.PI / 2 : 0);
-          const swing = Math.sin(phase) * 0.4 * Math.min(velLen * 3, 1);
-          child.rotation.x = 0.3 + swing;
+          
+          // Complex gait: Swing (forward/back) + Lift (up/down)
+          const swing = Math.sin(phase) * 0.5 * Math.min(velLen * 3, 1.2);
+          const lift = Math.max(0, Math.cos(phase)) * 0.3 * Math.min(velLen * 3, 1);
+          
+          // Apply rotations
+          child.rotation.x = 0.3 + swing; // Forward/back
+          child.rotation.z = child.userData.side * (0.4 - lift * 0.5); // Lift leg slightly
+          
+          // Animate the foot if it exists
+          if (child.userData.isFootOf !== undefined) {
+             // This logic is tricky because feet are separate children in current structure
+             // But looking at buildLimbs, feet are added to limbsGroup too.
+             // We need to find the foot corresponding to this limb.
+             // Actually, the loop iterates over ALL children of limbsGroup.
+          }
+        } else if (child.userData.isFootOf !== undefined) {
+           // This is a foot
+           const limbIndex = child.userData.isFootOf;
+           // We need to know the phase of the parent limb. 
+           // We can reconstruct it if we know the limb's properties, but we don't have easy access here.
+           // However, feet are added immediately after limbs in buildLimbs.
+           // Let's assume a simple phase offset for feet.
+           
+           // Find the limb this foot belongs to (it's at limbIndex in the group?)
+           // In buildLimbs: this.limbsGroup.add(limb); then this.limbsGroup.add(foot);
+           // So foot is at index i, limb is at index i-1? No, isFootOf stores the index.
+           
+           const limb = this.limbsGroup.children[child.userData.isFootOf];
+           if (limb) {
+              const phase = limbPhase + limb.userData.pairIndex * Math.PI + (limb.userData.side > 0 ? Math.PI / 2 : 0);
+              const footFlex = Math.sin(phase - 0.5) * 0.3;
+              child.rotation.x = footFlex;
+              
+              // Sync position with limb tip? 
+              // The limb rotates, but the foot is a separate object in the group.
+              // If we want the foot to stay attached to the limb tip, we should have parented it.
+              // Since they are separate, we must update foot position if we want it to look connected.
+              // But the current buildLimbs sets a static position.
+              // Let's just animate rotation for now to avoid breaking the model.
+           }
         }
       });
     }
 
-    // === EATING ANIMATION (jaw chomp) ===
+    // === EATING/ATTACKING ANIMATION (jaw chomp) ===
     if (this.jawsGroup.children.length >= 2) {
       const upperJaw = this.jawsGroup.children[0];
       const lowerJaw = this.jawsGroup.children[1];
 
-      if (this.isEating) {
-        // Chomping
-        const chomp = Math.sin(this.animTime * 20) * 0.5 + 0.5;
-        upperJaw.position.y = upperJaw.userData.restY + chomp * 0.08;
-        lowerJaw.position.y = lowerJaw.userData.restY - chomp * 0.08;
+      if (this.isAttacking) {
+        // Aggressive attack animation - fast, wide snap
+        const attackSpeed = 40;
+        const snap = Math.sin(this.animTime * attackSpeed);
+        const openAmount = (snap + 1) * 0.5; // 0 to 1
+        
+        // Wide open jaws for attack
+        upperJaw.rotation.x = -openAmount * 0.8; // Wider opening
+        lowerJaw.rotation.x = openAmount * 0.8;
+        
+        // Lunge forward during attack
+        const lunge = openAmount * 0.3;
+        upperJaw.position.z = 1.1 + lunge;
+        lowerJaw.position.z = 1.1 + lunge;
+        
+      } else if (this.isEating) {
+        // Chomping - Rotational bite for eating
+        const chompSpeed = 25;
+        const chomp = Math.sin(this.animTime * chompSpeed);
+        const openAmount = (chomp + 1) * 0.5; // 0 to 1
+        
+        // Rotate jaws open/closed
+        upperJaw.rotation.x = -openAmount * 0.4;
+        lowerJaw.rotation.x = openAmount * 0.4;
+        
+        // Slight position shake
+        upperJaw.position.y = upperJaw.userData.restY + Math.random() * 0.02;
       } else {
-        // Return to rest
+        // Return to rest smoothly
+        upperJaw.rotation.x *= 0.8;
+        lowerJaw.rotation.x *= 0.8;
+        
         upperJaw.position.y += (upperJaw.userData.restY - upperJaw.position.y) * 0.2;
         lowerJaw.position.y += (lowerJaw.userData.restY - lowerJaw.position.y) * 0.2;
+        upperJaw.position.z += (1.1 - upperJaw.position.z) * 0.2;
+        lowerJaw.position.z += (1.1 - lowerJaw.position.z) * 0.2;
       }
     }
 
@@ -680,7 +768,8 @@ export class World {
       creatures: Array.from(this.creatureRenderers.values()).map(r => r.data),
       plants: Array.from(this.plantRenderers.values()).map(r => r.data),
       corpses: Array.from(this.corpseRenderers.values()).map(r => r.data),
-      time: data.stats.time
+      time: data.stats.time,
+      energySources: data.stats.energySources // Pass diet stats
     });
   }
 

@@ -4,6 +4,17 @@ export class UI {
   constructor() {
     this.createStatsPanel();
     this.createCreaturePanel();
+    this.createDietPanel();
+    
+    // Smoothing for diet stats (rolling average)
+    this.dietHistory = {
+      plants: [],
+      meat: [],
+      filter: []
+    };
+    this.dietHistoryLength = 180; // Average over ~3 seconds at 60fps for very smooth stats
+    this.dietUpdateCounter = 0;
+    this.dietUpdateInterval = 30; // Update display every 30 frames (~2 times per second)
   }
 
   createStatsPanel() {
@@ -57,8 +68,8 @@ export class UI {
     panel.id = 'creature-panel';
     panel.style.cssText = `
       position: absolute;
-      top: 10px;
-      right: 10px;
+      bottom: 10px;
+      left: 10px;
       background: rgba(0, 0, 0, 0.8);
       color: white;
       padding: 15px;
@@ -66,10 +77,37 @@ export class UI {
       font-size: 11px;
       border-radius: 5px;
       min-width: 250px;
-      max-height: 80vh;
+      max-height: 60vh;
       overflow-y: auto;
       display: none;
       pointer-events: none;
+    `;
+    
+    document.body.appendChild(panel);
+  }
+
+  createDietPanel() {
+    const panel = document.createElement('div');
+    panel.id = 'diet-panel';
+    panel.style.cssText = `
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 15px;
+      font-family: monospace;
+      font-size: 12px;
+      border-radius: 5px;
+      min-width: 200px;
+      pointer-events: none;
+    `;
+    
+    panel.innerHTML = `
+      <div><strong>DIET (Energy/s)</strong></div>
+      <div id="diet-stats"></div>
+      <div style="margin-top: 10px;"><strong>POPULATION</strong></div>
+      <div id="population-breakdown"></div>
     `;
     
     document.body.appendChild(panel);
@@ -157,6 +195,91 @@ export class UI {
       });
 
       document.getElementById('avg-genes').innerHTML = html;
+    }
+    
+    // Update Diet Stats with smoothing
+    if (world.energySources) {
+      // Add current frame values to history (always collect data)
+      this.dietHistory.plants.push(world.energySources.plants || 0);
+      this.dietHistory.meat.push(world.energySources.meat || 0);
+      this.dietHistory.filter.push(world.energySources.filter || 0);
+      
+      // Trim history to maintain window size
+      if (this.dietHistory.plants.length > this.dietHistoryLength) {
+        this.dietHistory.plants.shift();
+        this.dietHistory.meat.shift();
+        this.dietHistory.filter.shift();
+      }
+      
+      // Only update display every N frames
+      this.dietUpdateCounter++;
+      if (this.dietUpdateCounter >= this.dietUpdateInterval) {
+        this.dietUpdateCounter = 0;
+        
+        // Calculate smoothed averages
+        const avgPlants = this.dietHistory.plants.reduce((a, b) => a + b, 0) / this.dietHistory.plants.length;
+        const avgMeat = this.dietHistory.meat.reduce((a, b) => a + b, 0) / this.dietHistory.meat.length;
+        const avgFilter = this.dietHistory.filter.reduce((a, b) => a + b, 0) / this.dietHistory.filter.length;
+        
+        // Convert to per-second rates
+        const plants = avgPlants * 60;
+        const meat = avgMeat * 60;
+        const filter = avgFilter * 60;
+        const total = plants + meat + filter;
+        
+        let dietHtml = '';
+        if (total > 0.1) { // Small threshold to avoid showing "0.0" noise
+          const pPct = ((plants / total) * 100).toFixed(1);
+          const mPct = ((meat / total) * 100).toFixed(1);
+          const fPct = ((filter / total) * 100).toFixed(1);
+          
+          dietHtml += `<div style="color:#8f8;">Plants: ${plants.toFixed(0)} (${pPct}%)</div>`;
+          dietHtml += `<div style="color:#f88;">Meat: ${meat.toFixed(0)} (${mPct}%)</div>`;
+          dietHtml += `<div style="color:#88f;">Filter: ${filter.toFixed(0)} (${fPct}%)</div>`;
+        } else {
+          dietHtml = '<div style="color:#888;">No activity</div>';
+        }
+        document.getElementById('diet-stats').innerHTML = dietHtml;
+        
+        // Calculate population breakdown by type (update with diet stats)
+        let predators = 0;
+        let parasites = 0;
+        let scavengers = 0;
+        let herbivores = 0;
+
+        world.creatures.forEach(c => {
+          // Categorize by dominant trait (threshold > 0.4 for specialization)
+          const isPredator = this.getGeneValue(c, 'predatory') > 0.4;
+          const isParasite = this.getGeneValue(c, 'parasitic') > 0.4;
+          const isScavenger = this.getGeneValue(c, 'scavenging') > 0.4;
+          
+          // A creature can have multiple traits, count primary role
+          if (isPredator) {
+            predators++;
+          } else if (isParasite) {
+            parasites++;
+          } else if (isScavenger) {
+            scavengers++;
+          } else {
+            herbivores++;
+          }
+        });
+
+        // Display population breakdown
+        let popHtml = '';
+        if (world.creatures.length > 0) {
+          const predPct = ((predators / world.creatures.length) * 100).toFixed(0);
+          const paraPct = ((parasites / world.creatures.length) * 100).toFixed(0);
+          const scavPct = ((scavengers / world.creatures.length) * 100).toFixed(0);
+          const herbPct = ((herbivores / world.creatures.length) * 100).toFixed(0);
+          
+          popHtml += `<div style="color:#f88;">Predators: ${predators} (${predPct}%)</div>`;
+          popHtml += `<div style="color:#a6f;">Parasites: ${parasites} (${paraPct}%)</div>`;
+          popHtml += `<div style="color:#da8;">Scavengers: ${scavengers} (${scavPct}%)</div>`;
+          popHtml += `<div style="color:#8f8;">Herbivores: ${herbivores} (${herbPct}%)</div>`;
+        }
+        document.getElementById('population-breakdown').innerHTML = popHtml;
+      }
     }
   }
 
