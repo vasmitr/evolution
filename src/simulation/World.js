@@ -1881,8 +1881,8 @@ class InstancedPlantRenderer {
     this.landIndices = []; // Available indices for land plants
     this.time = 0;
 
-    // Culling settings
-    this.cullDistance = 400; // Don't update plants beyond this distance
+    // Culling settings - hide plants beyond this distance from camera
+    this.cullDistance = 200; // Aggressive culling for better FPS
     this.camera = null; // Set by World
 
     // Shared geometry for all plants
@@ -1957,6 +1957,17 @@ class InstancedPlantRenderer {
     const index = indices.pop();
     const mesh = isWater ? this.waterMesh : this.landMesh;
 
+    // Check if plant is within visible range
+    let isVisible = true;
+    if (this.camera) {
+      this.camera.getWorldPosition(this._cameraPos);
+      const dx = data.position.x - this._cameraPos.x;
+      const dy = data.position.y - this._cameraPos.y;
+      const dz = data.position.z - this._cameraPos.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      isVisible = distSq < this.cullDistance * this.cullDistance;
+    }
+
     // Store plant data with position for distance checking
     this.plantData.set(data.id, {
       index,
@@ -1968,11 +1979,11 @@ class InstancedPlantRenderer {
         Math.random() * Math.PI,
         Math.random() * Math.PI
       ),
-      visible: true
+      visible: isVisible
     });
 
-    // Set initial transform
-    this.updatePlantMatrix(data, mesh, index, 0, true);
+    // Set initial transform (hidden if outside cull distance)
+    this.updatePlantMatrix(data, mesh, index, 0, isVisible);
 
     return true;
   }
