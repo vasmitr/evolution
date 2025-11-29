@@ -45,6 +45,7 @@ export class UI {
       <div id="stat-corpses">Corpses: 0</div>
       <div id="stat-generation">Max Generation: 0</div>
       <div id="stat-avg-age">Avg Age: 0s</div>
+      <div id="stat-lod" style="color:#8af; font-size:10px; margin-top:5px;"></div>
       <div style="margin-top: 10px;">
         <button id="reset-camera-btn" style="
           background: #444; 
@@ -215,6 +216,13 @@ export class UI {
 
     const avgAge = world.creatures.length > 0 ? totalAge / world.creatures.length : 0;
     document.getElementById('stat-avg-age').textContent = `Avg Age: ${avgAge.toFixed(1)}s`;
+
+    // Update LOD stats if available
+    if (world.lodStats) {
+      const { detailed, lod, culled, pooled } = world.lodStats;
+      document.getElementById('stat-lod').textContent =
+        `LOD: ${detailed} detailed, ${lod} simple, ${culled} culled (pool: ${pooled})`;
+    }
 
     // Calculate average genes
     if (world.creatures.length > 0) {
