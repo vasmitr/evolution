@@ -1531,13 +1531,12 @@ class LODCreatureManager {
     // LOD tracking
     this.detailedCreatures = new Map(); // id -> CreatureRenderer (nearby, full detail)
     this.lodCreatureIndices = new Map(); // id -> instanceIndex (distant, simple sphere)
+    this.indexToCreatureId = new Map(); // instanceIndex -> id (for swap-removal)
+    this.lodInstanceCount = 0; // Number of active LOD instances (indices 0 to count-1 are used)
 
     // Object pool for detailed renderers
     this.rendererPool = [];
     this.activeRenderers = new Map(); // id -> pooled CreatureRenderer
-
-    // Available LOD instance indices
-    this.availableLodIndices = [];
 
     // Initialize LOD instanced mesh for distant creatures
     this.initLodMesh();
@@ -1588,11 +1587,10 @@ class LODCreatureManager {
     const zeroMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
     for (let i = 0; i < this.maxCreatures; i++) {
       this.lodMesh.setMatrixAt(i, zeroMatrix);
-      this.availableLodIndices.push(i);
     }
 
     this.lodMesh.instanceMatrix.needsUpdate = true;
-    this.lodMesh.count = 0; // Start with no visible instances
+    this.lodMesh.count = 0; // Start with no visible instances (updated dynamically)
     this.scene.add(this.lodMesh);
   }
 
@@ -1724,8 +1722,8 @@ class LODCreatureManager {
       this.lodMesh.instanceColor.needsUpdate = true;
     }
 
-    // Update visible instance count
-    this.lodMesh.count = this.maxCreatures - this.availableLodIndices.length;
+    // Update visible instance count (indices 0 to lodInstanceCount-1 are active)
+    this.lodMesh.count = this.lodInstanceCount;
   }
 
   updateLodTransitions(shouldBeDetailed, shouldBeLod, dt) {
@@ -1779,14 +1777,15 @@ class LODCreatureManager {
     let index = this.lodCreatureIndices.get(data.id);
 
     if (index === undefined) {
-      // Allocate new LOD index
-      if (this.availableLodIndices.length === 0) return;
-      index = this.availableLodIndices.pop();
+      // Allocate new LOD index (contiguous from 0)
+      if (this.lodInstanceCount >= this.maxCreatures) return;
+      index = this.lodInstanceCount++;
       this.lodCreatureIndices.set(data.id, index);
+      this.indexToCreatureId.set(index, data.id);
     }
 
     // Calculate transform
-    const scale = 0.8 + data.size * 1.2;
+    const scale = 0.8 + (data.size || 0.5) * 1.2;
     this._position.set(data.position.x, data.position.y, data.position.z);
     this._scale.set(scale, scale, scale);
 
@@ -1818,12 +1817,33 @@ class LODCreatureManager {
     const index = this.lodCreatureIndices.get(id);
     if (index === undefined) return;
 
-    // Set to zero scale (invisible)
-    this._matrix.makeScale(0, 0, 0);
-    this.lodMesh.setMatrixAt(index, this._matrix);
+    // Swap-and-shrink: move last instance into this slot to keep indices contiguous
+    const lastIndex = this.lodInstanceCount - 1;
 
-    this.availableLodIndices.push(index);
+    if (index !== lastIndex && lastIndex >= 0) {
+      // Get the creature at the last index
+      const lastCreatureId = this.indexToCreatureId.get(lastIndex);
+
+      if (lastCreatureId !== undefined) {
+        // Copy last instance's matrix and color to the freed slot
+        this.lodMesh.getMatrixAt(lastIndex, this._matrix);
+        this.lodMesh.setMatrixAt(index, this._matrix);
+        this.lodMesh.getColorAt(lastIndex, this._color);
+        this.lodMesh.setColorAt(index, this._color);
+
+        // Update mappings for the moved creature
+        this.lodCreatureIndices.set(lastCreatureId, index);
+        this.indexToCreatureId.set(index, lastCreatureId);
+      }
+    }
+
+    // Clear the last slot and shrink
+    this._matrix.makeScale(0, 0, 0);
+    this.lodMesh.setMatrixAt(lastIndex, this._matrix);
+
     this.lodCreatureIndices.delete(id);
+    this.indexToCreatureId.delete(lastIndex);
+    this.lodInstanceCount--;
   }
 
   hideCreature(id) {
