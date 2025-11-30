@@ -114,10 +114,10 @@ export const DEFAULT_GENE_WEIGHTS = {
 
   // Movement weights
   movement: {
-    maxSpeedBase: 0.3,
+    maxSpeedBase: 0.5,       // Increased from 0.3 for better base movement
     maxSpeedFromSpeed: 0.7,
-    maxForceBase: 0.05,
-    maxForceFromManeuver: 0.15,
+    maxForceBase: 0.15,      // Increased from 0.05 so primitive creatures can move
+    maxForceFromManeuver: 0.2,
     limbsWaterDrag: 0.3, // Limbs create drag in water (reduced penalty)
     limbsLandBonus: 0.5, // Limbs help on land (increased bonus)
     limbsSwimBonus: 0.3, // Limbs can help swimming when adapted
@@ -305,6 +305,6 @@ export const SIMULATION_CONFIG = {
   mutationAmount: 4, // Up to 4 genes mutate at once
   initialPopulation: 50, // More starting creatures for diversity
   foodSpawnRate: 50.0, // High plant spawn rate to keep up with creatures
-  maxCreatures: 10000, // Higher limit - creatures still use individual meshes
-  maxPlants: 20000, // Plants use InstancedMesh - can handle many more efficiently
+  maxCreatures: 50000, // Increased limit - WebGPU can handle 100k+
+  maxPlants: 100000, // Plants use InstancedMesh - can handle many more efficiently
 };

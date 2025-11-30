@@ -1,5 +1,6 @@
 // Web Worker for simulation physics and logic
 // This runs all the heavy computation off the main thread
+// Supports WebGPU acceleration when available
 
 import { createNoise2D } from 'simplex-noise';
 import { WORLD_SIZE, SIMULATION_CONFIG, BIOMES, GENE_DEFINITIONS, DEFAULT_GENE_WEIGHTS, WEIGHT_MUTATION } from './Constants.js';
@@ -27,6 +28,12 @@ let currentNoise = null;
 let sharedBuffer = null;
 let useSharedBuffer = false;
 
+// GPU Simulation (optional, loaded dynamically)
+let gpuSimulator = null;
+let useGPU = false;
+let gpuInitialized = false;
+let gpuSyncNeeded = true; // Flag to sync CPU creatures to GPU
+
 // Terrain height cache - cleared each frame
 // Key: quantized (x,z) -> height value
 // Using 1-unit grid for cache (positions rounded to nearest integer)
@@ -36,6 +43,28 @@ const terrainCache = new Map();
 function init() {
   noise2D = createNoise2D();
   currentNoise = createNoise2D();
+}
+
+// Initialize GPU simulation (async, non-blocking)
+async function initGPU() {
+  if (gpuInitialized) return;
+  gpuInitialized = true;
+
+  try {
+    // Dynamic import to avoid blocking if GPU not available
+    const { initGPUCreatureSimulator } = await import('./gpu/index.js');
+    gpuSimulator = await initGPUCreatureSimulator();
+
+    if (gpuSimulator && gpuSimulator.isAvailable()) {
+      useGPU = true;
+      gpuSyncNeeded = true;
+      console.log('[Worker] WebGPU acceleration enabled for creature simulation');
+    } else {
+      console.log('[Worker] WebGPU not available, using CPU simulation');
+    }
+  } catch (error) {
+    console.log('[Worker] WebGPU initialization failed, using CPU:', error.message);
+  }
 }
 
 // Get terrain height at position
@@ -482,7 +511,12 @@ class WorkerCreature {
     this.id = id;
     this.dna = dna || new DNA();
     this.position = { x: position?.x || 0, y: position?.y || 0, z: position?.z || 0 };
-    this.velocity = { x: 0, y: 0, z: 0 };
+    // Start with random velocity to prevent creatures from clumping
+    this.velocity = {
+      x: (Math.random() - 0.5) * 1.0,
+      y: (Math.random() - 0.5) * 0.5,
+      z: (Math.random() - 0.5) * 1.0
+    };
     this.acceleration = { x: 0, y: 0, z: 0 };
 
     this.energy = 100;
@@ -823,17 +857,18 @@ class WorkerCreature {
     offspringDNA.mutate();
 
     const angle = Math.random() * Math.PI * 2;
+    // 3D offset - spread offspring in all directions including vertical
     const offset = {
-      x: Math.cos(angle) * 2,
-      y: 0,
-      z: Math.sin(angle) * 2
+      x: Math.cos(angle) * 3,
+      y: (Math.random() - 0.3) * 4,  // Slight upward bias, -1.2 to +2.8 units
+      z: Math.sin(angle) * 3
     };
 
     const offspring = new WorkerCreature(
       offspringDNA,
       {
         x: this.position.x + offset.x,
-        y: this.position.y,
+        y: this.position.y + offset.y,
         z: this.position.z + offset.z
       },
       nextCreatureId++
@@ -1142,7 +1177,8 @@ function initPopulation() {
     const x = (Math.random() - 0.5) * WORLD_SIZE.width * 0.8;
     const z = -200 - Math.random() * 250;  // Deep water zone
     const terrainHeight = getTerrainHeight(x, z);
-    const y = terrainHeight + 2 + Math.random() * 10;  // Above terrain, in water
+    // Spawn well above terrain with random spread in water column
+    const y = terrainHeight + 5 + Math.random() * 15;  // 5-20 units above terrain
 
     // Create blind filter feeders - all genes start near zero
     // They will evolve everything from scratch
@@ -2246,6 +2282,346 @@ function update(dt, cameraX = 0, cameraY = 0, cameraZ = 0, cullDistance = 300) {
   };
 }
 
+// GPU-accelerated update function
+// Uses WebGPU for creature physics, behavior, and metabolism
+// Falls back to CPU for reproduction and other complex operations
+async function updateWithGPU(dt, cameraX = 0, cameraY = 0, cameraZ = 0, cullDistance = 300) {
+  const t0 = performance.now();
+
+  // Cap terrain cache
+  if (terrainCache.size > 50000) {
+    terrainCache.clear();
+  }
+
+  globalFrameCount++;
+  time += dt;
+  currentTime += dt;
+
+  const newCreatures = [];
+  const deadCreatureIds = [];
+  const newCorpses = [];
+  const deadCorpseIds = [];
+
+  // Sync creatures to GPU if needed (first frame or after CPU changes)
+  if (gpuSyncNeeded) {
+    gpuSimulator.syncCreaturesToGPU(creatures);
+    gpuSyncNeeded = false;
+  }
+
+  // Sync corpses for scavenging behavior
+  gpuSimulator.syncCorpsesToGPU(corpses);
+
+  // Sync plants for foraging behavior
+  gpuSimulator.syncPlantsToGPU(plants);
+
+  // Run GPU simulation
+  const gpuData = await gpuSimulator.runSimulationStep(dt, {
+    worldWidth: WORLD_SIZE.width,
+    worldDepth: WORLD_SIZE.depth
+  });
+
+  if (!gpuData) {
+    // GPU failed, fall back to CPU
+    console.warn('[Worker] GPU simulation failed, falling back to CPU');
+    useGPU = false;
+    return update(dt, cameraX, cameraY, cameraZ, cullDistance);
+  }
+
+  // Apply GPU results to CPU creatures and get reproduction candidates
+  const { deadCreatures, reproductionCandidates } = gpuSimulator.applyResultsToCreatures(gpuData, creatures);
+
+  // Debug: log creature state every 5 seconds
+  if (Math.floor(time) % 5 === 0 && Math.floor(time) !== Math.floor(time - dt)) {
+    const matureCreatures = creatures.filter(c => c.mature && !c.dead);
+    const highEnergyCreatures = creatures.filter(c => c.energy > 120 && !c.dead);
+    console.log(`[GPU Debug] Creatures: ${creatures.length}, Mature: ${matureCreatures.length}, Energy>120: ${highEnergyCreatures.length}, Dead this frame: ${deadCreatures.length}`);
+    if (creatures.length > 0) {
+      const sample = creatures[0];
+      console.log(`[GPU Debug] Sample creature - Age: ${sample.age.toFixed(1)}, Energy: ${sample.energy.toFixed(1)}, Mature: ${sample.mature}`);
+    }
+  }
+
+  // Plant eating on CPU (GPU handles seeking, CPU handles collision/energy transfer)
+  const eatenPlantIds = [];
+  let plantEatAttempts = 0;
+  let plantEatSuccesses = 0;
+  for (const c of creatures) {
+    if (c.dead) continue;
+    // Predators can't eat plants
+    if (c.predatory > 0.5) continue;
+    // Stagger plant checks
+    if (!c.shouldDoExpensiveUpdate()) continue;
+
+    // Check 2 cells radius to catch plants that might be close in 3D but different in 2D grid
+    const nearbyPlants = spatialGrid.getNearby(c.position.x, c.position.z, 2);
+    plantEatAttempts++;
+    for (const p of nearbyPlants) {
+      if (p.dead) continue;
+      const dx = c.position.x - p.position.x;
+      const dy = c.position.y - p.position.y;
+      const dz = c.position.z - p.position.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+      // Larger eating radius to account for 3D movement and vertical plant distribution
+      if (dist < 5 + c.size * 2) {
+        const herbivoreBonus = 1 + (1 - c.predatory) * 0.5;
+        const jawsBonus = 1 + c.jaws * 0.5;
+        const sizeBonus = 1 + c.size * 0.3;
+        const totalEfficiency = herbivoreBonus * jawsBonus * sizeBonus;
+
+        const consumeAmount = c.jaws > 0.2 ? p.energy : Math.min(p.energy, 10 + c.size * 5);
+        const energyGained = consumeAmount * totalEfficiency;
+
+        c.eat(energyGained);
+        p.energy -= consumeAmount;
+        plantEatSuccesses++;
+
+        if (p.energy <= 0) {
+          p.dead = true;
+          eatenPlantIds.push(p.id);
+          const idx = plants.indexOf(p);
+          if (idx > -1) plants.splice(idx, 1);
+        }
+        break; // One plant per frame per creature
+      }
+    }
+  }
+
+  // Debug plant eating
+  if (Math.floor(time) % 5 === 0 && Math.floor(time) !== Math.floor(time - dt)) {
+    console.log(`[GPU Debug] Plant eating - Attempts: ${plantEatAttempts}, Successes: ${plantEatSuccesses}, Plants: ${plants.length}`);
+  }
+
+  // Handle deaths on CPU
+  for (const deadCreature of deadCreatures) {
+    deadCreatureIds.push(deadCreature.id);
+    // Create corpse
+    const corpse = new WorkerCorpse(deadCreature, nextCorpseId++);
+    corpses.push(corpse);
+    newCorpses.push(corpse.toData());
+  }
+
+  // Remove dead creatures from array
+  creatures = creatures.filter(c => !c.dead);
+
+  // Handle reproduction on CPU (DNA mutation is complex)
+  if (reproductionCandidates.length > 0) {
+    console.log(`[GPU] Reproduction candidates: ${reproductionCandidates.length}`);
+  }
+  for (const parent of reproductionCandidates) {
+    if (creatures.length < SIMULATION_CONFIG.maxCreatures) {
+      const offspring = parent.reproduce();
+      if (offspring) {
+        newCreatures.push(offspring);
+        creatures.push(offspring);
+        gpuSyncNeeded = true; // Need to sync new creature to GPU
+      }
+    }
+  }
+
+  // Calculate stats
+  let maxGeneration = 0;
+  let matureCount = 0;
+  let totalAge = 0;
+  let predatorCount = 0;
+  let parasiteCount = 0;
+  let scavengerCount = 0;
+  let herbivoreCount = 0;
+  const geneAverages = {
+    size: 0, speed: 0, sight: 0, smell: 0, hearing: 0,
+    armor: 0, metabolicEfficiency: 0, toxicity: 0, coldResistance: 0,
+    heatResistance: 0, lungCapacity: 0, scavenging: 0, parasitic: 0,
+    reproductionUrgency: 0, maneuverability: 0, predatory: 0,
+    limbs: 0, jaws: 0, filterFeeding: 0, colorHue: 0, colorSaturation: 0
+  };
+
+  for (const c of creatures) {
+    if (c.generation > maxGeneration) maxGeneration = c.generation;
+    if (c.mature) matureCount++;
+    totalAge += c.age;
+
+    if (c.predatory > 0.4) predatorCount++;
+    else if (c.parasitic > 0.4) parasiteCount++;
+    else if (c.scavenging > 0.4) scavengerCount++;
+    else herbivoreCount++;
+
+    geneAverages.size += c.size;
+    geneAverages.speed += c.speed;
+    geneAverages.sight += c.sight;
+    geneAverages.smell += c.smell;
+    geneAverages.hearing += c.hearing;
+    geneAverages.armor += c.armor;
+    geneAverages.metabolicEfficiency += c.metabolicEfficiency;
+    geneAverages.toxicity += c.toxicity;
+    geneAverages.coldResistance += c.coldResistance;
+    geneAverages.heatResistance += c.heatResistance;
+    geneAverages.lungCapacity += c.lungCapacity;
+    geneAverages.scavenging += c.scavenging;
+    geneAverages.parasitic += c.parasitic;
+    geneAverages.reproductionUrgency += c.reproductionUrgency;
+    geneAverages.maneuverability += c.maneuverability;
+    geneAverages.predatory += c.predatory;
+    geneAverages.limbs += c.limbs;
+    geneAverages.jaws += c.jaws;
+    geneAverages.filterFeeding += c.filterFeeding;
+    geneAverages.colorHue += c.colorHue;
+    geneAverages.colorSaturation += c.colorSaturation;
+  }
+
+  // Update corpses (CPU)
+  for (let j = corpses.length - 1; j >= 0; j--) {
+    const corpse = corpses[j];
+    const terrainHeight = getTerrainHeight(corpse.position.x, corpse.position.z);
+    const biome = getBiome(terrainHeight);
+    corpse.update(dt, biome);
+
+    if (corpse.position.y < 0) {
+      corpse.position.y -= 0.5 * dt;
+      if (corpse.position.y < terrainHeight + 0.5) {
+        corpse.position.y = terrainHeight + 0.5;
+      }
+    }
+
+    if (corpse.dead) {
+      deadCorpseIds.push(corpse.id);
+      corpses.splice(j, 1);
+    }
+  }
+
+  // Update plants (CPU - same as before)
+  const deadPlantIds = [];
+  const newPlants = [];
+  const plantHalfWidth = WORLD_SIZE.width / 2 - 15;
+  const plantHalfDepth = WORLD_SIZE.depth / 2 - 15;
+
+  for (let j = plants.length - 1; j >= 0; j--) {
+    const p = plants[j];
+    const terrainHeight = getTerrainHeight(p.position.x, p.position.z);
+    const biome = getBiomeAt(p.position.x, p.position.z);
+    p.update(dt, biome);
+
+    if (p.isOnLand) {
+      p.position.y = terrainHeight + 0.5;
+    } else {
+      const current = getCurrentAt(p.position.x, p.position.z, terrainHeight);
+      const newX = p.position.x + current.x * dt * 3;
+      const newZ = p.position.z + current.z * dt * 3;
+      p.position.y += current.y * dt * 3;
+
+      if (Math.abs(newX) < plantHalfWidth && Math.abs(newZ) < plantHalfDepth) {
+        if (newZ < -100) {
+          p.position.x = newX;
+          p.position.z = newZ;
+        }
+      }
+
+      const currentTerrainH = getTerrainHeight(p.position.x, p.position.z);
+      const currentWaterDepth = Math.abs(currentTerrainH);
+      const maxPlantY = currentTerrainH + Math.min(currentWaterDepth * 0.4, 5) + 1;
+
+      if (p.position.y < currentTerrainH + 0.5) {
+        p.position.y = currentTerrainH + 0.5;
+      }
+      if (p.position.y > maxPlantY) {
+        p.position.y = maxPlantY;
+      }
+    }
+
+    p.position.x = Math.max(-plantHalfWidth, Math.min(plantHalfWidth, p.position.x));
+    p.position.z = Math.max(-plantHalfDepth, Math.min(plantHalfDepth, p.position.z));
+
+    if (p.dead) {
+      deadPlantIds.push(p.id);
+      plants.splice(j, 1);
+    }
+  }
+
+  // Plant spawning (same as CPU version)
+  let spawnCount = SIMULATION_CONFIG.foodSpawnRate * dt;
+  if (creatures.length > 0) {
+    const ratio = plants.length / creatures.length;
+    if (ratio < 2.0) spawnCount *= 5;
+    else if (ratio < 4.0) spawnCount *= 2;
+  }
+  const countToSpawn = Math.floor(spawnCount) + (Math.random() < (spawnCount % 1) ? 1 : 0);
+
+  if (plants.length < SIMULATION_CONFIG.maxPlants && countToSpawn > 0) {
+    for (let k = 0; k < countToSpawn; k++) {
+      const x = (Math.random() - 0.5) * WORLD_SIZE.width;
+      let z = Math.random() < 0.8 ? -100 - Math.random() * 400 : -100 + Math.random() * 600;
+      const terrainH = getTerrainHeight(x, z);
+      const isOnLand = z >= -100;
+      let y = isOnLand ? terrainH + 0.5 : terrainH + 1 + Math.random() * Math.max(Math.abs(terrainH) * 0.9, 10);
+
+      const newPlant = new WorkerPlant({ x, y, z }, nextPlantId++, isOnLand);
+      newPlant.energy = 25;
+      plants.push(newPlant);
+      newPlants.push(newPlant.toData());
+    }
+  }
+
+  const tEnd = performance.now();
+  if (globalFrameCount % 120 === 0) {
+    console.log(`[Worker GPU] Frame time: ${(tEnd - t0).toFixed(1)}ms, Creatures: ${creatures.length}`);
+  }
+
+  // Serialize and return
+  const creatureData = creatures.map(c => c.toUpdateData());
+  const plantData = plants.map(p => p.toData());
+  const corpseData = corpses.map(c => c.toData());
+
+  return {
+    creatures: creatureData,
+    plants: plantData,
+    corpses: corpseData,
+    newPlants,
+    newCorpses,
+    deadCreatureIds,
+    deadPlantIds: [...deadPlantIds, ...eatenPlantIds],
+    deadCorpseIds,
+    newCreatures: newCreatures.map(c => c.toData()),
+    stats: {
+      creatureCount: creatures.length,
+      plantCount: plants.length,
+      corpseCount: corpses.length,
+      time,
+      energySources: { plants: 0, meat: 0, filter: 0 },
+      maxGeneration,
+      matureCount,
+      avgAge: creatures.length > 0 ? totalAge / creatures.length : 0,
+      population: {
+        predators: predatorCount,
+        parasites: parasiteCount,
+        scavengers: scavengerCount,
+        herbivores: herbivoreCount
+      },
+      avgGenes: creatures.length > 0 ? {
+        size: geneAverages.size / creatures.length,
+        speed: geneAverages.speed / creatures.length,
+        sight: geneAverages.sight / creatures.length,
+        smell: geneAverages.smell / creatures.length,
+        hearing: geneAverages.hearing / creatures.length,
+        armor: geneAverages.armor / creatures.length,
+        metabolicEfficiency: geneAverages.metabolicEfficiency / creatures.length,
+        toxicity: geneAverages.toxicity / creatures.length,
+        coldResistance: geneAverages.coldResistance / creatures.length,
+        heatResistance: geneAverages.heatResistance / creatures.length,
+        lungCapacity: geneAverages.lungCapacity / creatures.length,
+        scavenging: geneAverages.scavenging / creatures.length,
+        parasitic: geneAverages.parasitic / creatures.length,
+        reproductionUrgency: geneAverages.reproductionUrgency / creatures.length,
+        maneuverability: geneAverages.maneuverability / creatures.length,
+        predatory: geneAverages.predatory / creatures.length,
+        limbs: geneAverages.limbs / creatures.length,
+        jaws: geneAverages.jaws / creatures.length,
+        filterFeeding: geneAverages.filterFeeding / creatures.length,
+        colorHue: geneAverages.colorHue / creatures.length,
+        colorSaturation: geneAverages.colorSaturation / creatures.length
+      } : null
+    }
+  };
+}
+
 // Write all entity positions to shared buffer (zero-copy transfer)
 function writeToSharedBuffer() {
   if (!sharedBuffer) return;
@@ -2284,7 +2660,7 @@ function writeToSharedBuffer() {
 }
 
 // Message handler
-self.onmessage = function(e) {
+self.onmessage = async function(e) {
   const { type, data } = e.data;
 
   switch (type) {
@@ -2294,6 +2670,9 @@ self.onmessage = function(e) {
       creatureSpatialGrid = new WorkerSpatialGrid(WORLD_SIZE.width, WORLD_SIZE.depth, 50);
       corpseSpatialGrid = new WorkerSpatialGrid(WORLD_SIZE.width, WORLD_SIZE.depth, 50);
       initPopulation();
+
+      // Try to initialize GPU (non-blocking)
+      initGPU().catch(err => console.log('[Worker] GPU init error:', err));
 
       // Send initial state
       self.postMessage({
@@ -2317,16 +2696,32 @@ self.onmessage = function(e) {
     case 'update':
       // Pass camera position for distance-based culling
       // Worker pre-culls entities by distance, dramatically reducing data transfer
-      const result = update(
-        data.dt,
-        data.cameraX || 0,
-        data.cameraY || 0,
-        data.cameraZ || 0,
-        data.cullDistance || 300
-      );
-
-      // Send only nearby entities (already culled in update())
-      self.postMessage({ type: 'update', data: result });
+      // Use GPU if available, otherwise fall back to CPU
+      if (useGPU && gpuSimulator) {
+        updateWithGPU(
+          data.dt,
+          data.cameraX || 0,
+          data.cameraY || 0,
+          data.cameraZ || 0,
+          data.cullDistance || 300
+        ).then(result => {
+          self.postMessage({ type: 'update', data: result });
+        }).catch(err => {
+          console.error('[Worker] GPU update failed:', err);
+          useGPU = false;
+          const result = update(data.dt, data.cameraX || 0, data.cameraY || 0, data.cameraZ || 0, data.cullDistance || 300);
+          self.postMessage({ type: 'update', data: result });
+        });
+      } else {
+        const result = update(
+          data.dt,
+          data.cameraX || 0,
+          data.cameraY || 0,
+          data.cameraZ || 0,
+          data.cullDistance || 300
+        );
+        self.postMessage({ type: 'update', data: result });
+      }
       break;
   }
 };

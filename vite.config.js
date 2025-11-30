@@ -14,4 +14,9 @@ export default defineConfig({
       'Cross-Origin-Embedder-Policy': 'require-corp',
     },
   },
+  // Handle WGSL shader files
+  assetsInclude: ['**/*.wgsl'],
+  worker: {
+    format: 'es',
+  },
 });
