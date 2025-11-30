@@ -3,6 +3,16 @@
 
 import { createNoise2D } from 'simplex-noise';
 import { WORLD_SIZE, SIMULATION_CONFIG, BIOMES, GENE_DEFINITIONS, DEFAULT_GENE_WEIGHTS, WEIGHT_MUTATION } from './Constants.js';
+import {
+  attachSharedBuffer,
+  writeCreature,
+  writePlant,
+  writeCorpse,
+  HEADER,
+  MAX_CREATURES,
+  MAX_PLANTS,
+  MAX_CORPSES
+} from './SharedBuffer.js';
 
 // Worker state
 let creatures = [];
@@ -12,6 +22,15 @@ let time = 0;
 let currentTime = 0;
 let noise2D = null;
 let currentNoise = null;
+
+// Shared buffer for zero-copy data transfer
+let sharedBuffer = null;
+let useSharedBuffer = false;
+
+// Terrain height cache - cleared each frame
+// Key: quantized (x,z) -> height value
+// Using 1-unit grid for cache (positions rounded to nearest integer)
+const terrainCache = new Map();
 
 // Initialize noise functions
 function init() {
@@ -28,6 +47,16 @@ function init() {
 // z 200 to 350: Desert (y = 10 to 15)
 // z > 350: Tundra (y = 15 to 20)
 function getTerrainHeight(x, z) {
+  // Check cache first (quantize to 2-unit grid for good cache hit rate)
+  const qx = Math.round(x * 0.5);
+  const qz = Math.round(z * 0.5);
+  const key = qx * 100000 + qz;  // Simple hash for integer coords
+
+  const cached = terrainCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   // Small noise for natural variation
   const noise = noise2D(x * 0.02, z * 0.02) * 2;
 
@@ -59,7 +88,9 @@ function getTerrainHeight(x, z) {
     baseHeight = 15 + t * 5; // 15 to 20
   }
 
-  return baseHeight + noise;
+  const height = baseHeight + noise;
+  terrainCache.set(key, height);
+  return height;
 }
 
 // Get biome at position (now based on Z, not height)
@@ -442,6 +473,9 @@ class DNA {
   }
 }
 
+// Frame counter for staggered updates
+let globalFrameCount = 0;
+
 // Creature class for worker (no THREE.js)
 class WorkerCreature {
   constructor(dna, position, id) {
@@ -458,8 +492,16 @@ class WorkerCreature {
     this.mature = false;
     this.developmentProgress = 0;
 
+    // Stagger expensive updates across frames (each creature has different offset)
+    this.updateOffset = id % 8;  // 0-7, determines which frame group this creature is in
+
     this.cacheGeneValues();
     this.calculateMaxAge();
+  }
+
+  // Check if this creature should do expensive operations this frame
+  shouldDoExpensiveUpdate() {
+    return (globalFrameCount % 8) === this.updateOffset;
   }
 
   // Cache gene values for quick access
@@ -1154,8 +1196,31 @@ function initPopulation() {
   }
 }
 
+// Performance tracking
+let perfLastLog = 0;
+let perfUpdateCount = 0;
+let perfTotalSimTime = 0;
+let perfTotalSerializeTime = 0;
+let perfTotalGridTime = 0;
+let perfTotalCreatureLoop = 0;
+let perfTotalPlantLoop = 0;
+// Granular creature loop timing
+let perfCreatureUpdate = 0;
+let perfCreaturePhysics = 0;
+let perfCreatureInteractions = 0;
+let perfCreaturePlantEating = 0;
+
 // Main simulation update
-function update(dt) {
+function update(dt, cameraX = 0, cameraY = 0, cameraZ = 0, cullDistance = 300) {
+  const t0 = performance.now();
+
+  // Cap terrain cache size to prevent unbounded memory growth
+  // Since terrain is static, we keep the cache across frames for better performance
+  if (terrainCache.size > 50000) {
+    terrainCache.clear();
+  }
+
+  globalFrameCount++;
   time += dt;
   currentTime += dt;
 
@@ -1188,6 +1253,7 @@ function update(dt) {
   };
 
   // Build creature spatial grid for hunting
+  const tGrid0 = performance.now();
   creatureSpatialGrid.clear();
   for (const c of creatures) {
     if (!c.dead) {
@@ -1202,10 +1268,15 @@ function update(dt) {
       corpseSpatialGrid.insert(corpse);
     }
   }
+  const tGrid1 = performance.now();
+  perfTotalGridTime += tGrid1 - tGrid0;
 
   // Update creatures
+  const tCreature0 = performance.now();
+  let tPhysicsAccum = 0, tInteractionsAccum = 0, tUpdateAccum = 0;
   for (let i = creatures.length - 1; i >= 0; i--) {
     const c = creatures[i];
+    const tLoopStart = performance.now();
 
     // Collect stats while iterating (no separate loop needed)
     if (c.generation > maxGeneration) maxGeneration = c.generation;
@@ -1423,279 +1494,209 @@ function update(dt) {
       }
     }
 
-    // Hunting behavior - predatory creatures seek prey
-    if (c.predatory > 0.3 && c.jaws > 0.2) {
-      // Calculate water depth for sense effectiveness
+    const tPhysicsEnd = performance.now();
+    tPhysicsAccum += tPhysicsEnd - tLoopStart;
+
+    // === UNIFIED CREATURE INTERACTIONS ===
+    // Do ONE spatial query and handle all behaviors (hunting, scavenging, parasitism)
+    // Only on staggered frames to reduce CPU load
+    if (c.shouldDoExpensiveUpdate()) {
       const waterDepth = isInWater ? Math.abs(terrainHeight) : 0;
-      const effectiveSenseRange = c.getSenseRange(isInWater, waterDepth);
-      const gridRange = Math.ceil(effectiveSenseRange / 50) + 1;
+      const effectiveSenseRange = Math.min(c.getSenseRange(isInWater, waterDepth), 60); // Cap for performance
+      const gridRange = Math.ceil(effectiveSenseRange / 50); // Removed +1, was too aggressive
+
+      // Single query for all creature interactions
       const nearbyCreatures = creatureSpatialGrid.getNearby(c.position.x, c.position.z, gridRange);
+      // Single query for corpse interactions
+      const nearbyCorpses = (c.scavenging > 0.2 || c.predatory > 0.5) ?
+        corpseSpatialGrid.getNearby(c.position.x, c.position.z, gridRange) : [];
 
-      // Collect valid prey targets with their scores
-      const validPrey = [];
+      // Track best targets for each behavior
+      let bestPrey = null, bestPreyScore = -Infinity, bestPreyDist = 0;
+      let bestHost = null, bestHostScore = -Infinity, bestHostDist = 0;
+      let bestCorpse = null, bestCorpseDist = Infinity;
 
+      // Process all nearby creatures in ONE loop
+      // Limit iterations for performance - check at most 50 neighbors
+      let checked = 0;
+      const maxToCheck = 50;
       for (const target of nearbyCreatures) {
         if (target === c || target.dead) continue;
-        
-        // Predators can hunt each other if size difference is significant
-        // OR if both are predators (competition)
-        const canHuntPredator = (c.size > target.size * 1.3) || (target.predatory > 0.5 && c.predatory > 0.5);
-        
-        // Skip other predators unless we can hunt them
-        if (target.predatory > 0.5 && !canHuntPredator) continue;
 
         const dx = target.position.x - c.position.x;
         const dy = target.position.y - c.position.y;
         const dz = target.position.z - c.position.z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const distSq = dx * dx + dy * dy + dz * dz;
 
-        // Use the new sense-based detection system
-        if (!c.canDetect(target, dist, isInWater, waterDepth)) continue;
+        // Skip if too far (use squared distance to avoid sqrt)
+        if (distSq > effectiveSenseRange * effectiveSenseRange) continue;
 
-        // Score prey: prefer smaller, weaker targets nearby
-        const sizeDiff = c.size - target.size;
-        const armorPenalty = target.armor * 30;
-        const toxicPenalty = target.toxicity * 50;
-        const distPenalty = dist * 0.5;
-        const score = sizeDiff * 20 - armorPenalty - toxicPenalty - distPenalty + target.energy * 0.1;
+        const dist = Math.sqrt(distSq);
+        checked++;
 
-        if (score > -20) {  // Only consider viable prey
-          validPrey.push({ target, dist, score });
-        }
-      }
+        // Skip canDetect for very close creatures (< 15 units) - they're obviously detected
+        // Only do expensive detection check for distant targets
+        if (dist > 15 && !c.canDetect(target, dist, isInWater, waterDepth)) continue;
 
-      // Pick from top prey candidates (not always the absolute best)
-      let targetPrey = null;
-      let targetDist = 0;
-
-      if (validPrey.length > 0) {
-        // Sort by score, pick randomly from top 3
-        validPrey.sort((a, b) => b.score - a.score);
-        const pickFrom = Math.min(3, validPrey.length);
-        const picked = validPrey[Math.floor(Math.random() * pickFrom)];
-        targetPrey = picked.target;
-        targetDist = picked.dist;
-      }
-
-      if (targetPrey) {
-        // Move towards prey (slowly)
-        const dx = targetPrey.position.x - c.position.x;
-        const dy = targetPrey.position.y - c.position.y;
-        const dz = targetPrey.position.z - c.position.z;
-
-        if (targetDist > 0) {
-          const huntSpeed = c.maxForce * (0.5 + c.predatory * 0.5);
-          c.acceleration.x += (dx / targetDist) * huntSpeed;
-          c.acceleration.y += (dy / targetDist) * huntSpeed * 0.3;
-          c.acceleration.z += (dz / targetDist) * huntSpeed;
-        }
-
-        // Attack if close enough
-        if (targetDist < 3 + c.size + targetPrey.size) {
-          const killed = c.attack(targetPrey);
-
-          if (killed) {
-            // Predator gets big energy bonus from the kill
-            const killBonus = 40 + targetPrey.size * 30 + targetPrey.energy * 0.3;
-            c.energy += killBonus;
-
-            // Create corpse from killed prey
-            const corpse = new WorkerCorpse(targetPrey, nextCorpseId++);
-            corpses.push(corpse);
-            newCorpses.push(corpse.toData());
-
-            // Energy gained from kill (predator eats some immediately)
-            energyStats.meat += killBonus + 20; // Track the bonus + base
+        // HUNTING: Check if this is valid prey
+        if (c.predatory > 0.3 && c.jaws > 0.2) {
+          const canHuntPredator = (c.size > target.size * 1.3) || (target.predatory > 0.5 && c.predatory > 0.5);
+          if (!(target.predatory > 0.5 && !canHuntPredator)) {
+            const sizeDiff = c.size - target.size;
+            const score = sizeDiff * 20 - target.armor * 30 - target.toxicity * 50 - dist * 0.5 + target.energy * 0.1;
+            if (score > bestPreyScore && score > -20) {
+              bestPrey = target;
+              bestPreyScore = score;
+              bestPreyDist = dist;
+            }
           }
         }
+
+        // PARASITISM: Check if this is valid host
+        if (c.parasitic > 0.3) {
+          if (target.size > c.size * 0.8 && target.energy > 30) {
+            const hostScore = target.size * 10 + target.energy * 0.2 - dist - (target.toxicity * 30) - (target.armor * 20);
+            if (hostScore > bestHostScore) {
+              bestHost = target;
+              bestHostScore = hostScore;
+              bestHostDist = dist;
+            }
+          }
+        }
+
+        // Early exit if we've checked enough and found good targets
+        if (checked >= maxToCheck && (bestPrey || bestHost)) break;
       }
-    }
 
-    // Scavenging behavior - all carnivores can eat corpses
-    // Specialists (high scavenging) are better at finding them
-    if (c.scavenging > 0.2 || c.predatory > 0.5) {
-      // Use senses to find corpses
-      const waterDepth = isInWater ? Math.abs(terrainHeight) : 0;
-      const corpseSenseRange = c.getSenseRange(isInWater, waterDepth) * 0.8; // Good range for corpses
-      const gridRange = Math.ceil(corpseSenseRange / 50) + 1;
-      const nearbyCorpses = corpseSpatialGrid.getNearby(c.position.x, c.position.z, gridRange);
-      
-      // Find best corpse target
-      let bestCorpse = null;
-      let bestDist = Infinity;
-
+      // Process corpses in ONE loop
       for (const corpse of nearbyCorpses) {
         if (corpse.dead || corpse.energy < 5) continue;
-
         const dx = corpse.position.x - c.position.x;
         const dy = corpse.position.y - c.position.y;
         const dz = corpse.position.z - c.position.z;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        
-        // Can detect corpses with smell (primary) and sight
-        // Scavenging specialists have better detection
         const scavBonus = c.scavenging * 20;
-        const corpseDetectRange = 10 + c.smell * 40 + c.sight * 15 + scavBonus;
-        if (dist < corpseDetectRange && dist < bestDist) {
+        const detectRange = 10 + c.smell * 40 + c.sight * 15 + scavBonus;
+        if (dist < detectRange && dist < bestCorpseDist) {
           bestCorpse = corpse;
-          bestDist = dist;
+          bestCorpseDist = dist;
         }
       }
 
-      if (bestCorpse) {
+      // === EXECUTE BEST ACTIONS ===
+
+      // Hunting action
+      if (bestPrey) {
+        const dx = bestPrey.position.x - c.position.x;
+        const dy = bestPrey.position.y - c.position.y;
+        const dz = bestPrey.position.z - c.position.z;
+        if (bestPreyDist > 0) {
+          const huntSpeed = c.maxForce * (0.5 + c.predatory * 0.5);
+          c.acceleration.x += (dx / bestPreyDist) * huntSpeed;
+          c.acceleration.y += (dy / bestPreyDist) * huntSpeed * 0.3;
+          c.acceleration.z += (dz / bestPreyDist) * huntSpeed;
+        }
+        if (bestPreyDist < 3 + c.size + bestPrey.size) {
+          const killed = c.attack(bestPrey);
+          if (killed) {
+            const killBonus = 40 + bestPrey.size * 30 + bestPrey.energy * 0.3;
+            c.energy += killBonus;
+            const corpse = new WorkerCorpse(bestPrey, nextCorpseId++);
+            corpses.push(corpse);
+            newCorpses.push(corpse.toData());
+            energyStats.meat += killBonus + 20;
+          }
+        }
+      }
+
+      // Scavenging action
+      if (bestCorpse && !bestPrey) {  // Only scavenge if not hunting
         const dx = bestCorpse.position.x - c.position.x;
         const dy = bestCorpse.position.y - c.position.y;
         const dz = bestCorpse.position.z - c.position.z;
-        const dist = bestDist;
-        
-        // Move towards corpse
-        if (dist > 3) {
+        if (bestCorpseDist > 3) {
           const scavSpeed = c.maxForce * (0.5 + c.scavenging * 0.5);
-          c.acceleration.x += (dx / dist) * scavSpeed;
-          c.acceleration.y += (dy / dist) * scavSpeed * 0.2;
-          c.acceleration.z += (dz / dist) * scavSpeed;
+          c.acceleration.x += (dx / bestCorpseDist) * scavSpeed;
+          c.acceleration.y += (dy / bestCorpseDist) * scavSpeed * 0.2;
+          c.acceleration.z += (dz / bestCorpseDist) * scavSpeed;
         }
-
-        // Eat from corpse if close
-        if (dist < 3 + c.size + bestCorpse.size) {
+        if (bestCorpseDist < 3 + c.size + bestCorpse.size) {
           const gained = c.scavenge(bestCorpse);
-          energyStats.meat += gained * (0.3 + c.scavenging * 0.7); // Track actual energy gained
-          if (bestCorpse.energy <= 0) {
-            bestCorpse.dead = true;
-          }
-        }
-      }
-    }
-
-    // Parasitic behavior - parasites seek larger hosts and drain energy
-    if (c.parasitic > 0.3) {
-      const nearbyHosts = creatureSpatialGrid.getNearby(c.position.x, c.position.z, 2);
-
-      let bestHost = null;
-      let bestScore = -Infinity;
-      let bestDist = 0;
-
-      for (const host of nearbyHosts) {
-        if (host === c || host.dead) continue;
-
-        // Parasites prefer larger, slower hosts with less armor
-        const sizeDiff = host.size - c.size;
-        if (sizeDiff < 0.1) continue; // Host must be larger
-
-        const dx = host.position.x - c.position.x;
-        const dy = host.position.y - c.position.y;
-        const dz = host.position.z - c.position.z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-
-        // Score hosts: prefer large, slow, low-armor, high-energy targets
-        const score = sizeDiff * 30 +
-                     (1 - host.speed) * 20 -
-                     host.armor * 40 +
-                     host.energy * 0.2 -
-                     dist * 0.3 -
-                     host.toxicity * 50;
-
-        if (score > bestScore) {
-          bestScore = score;
-          bestHost = host;
-          bestDist = dist;
+          energyStats.meat += gained * (0.3 + c.scavenging * 0.7);
+          if (bestCorpse.energy <= 0) bestCorpse.dead = true;
         }
       }
 
-      if (bestHost) {
+      // Parasitism action
+      if (bestHost && !bestPrey && !bestCorpse) {  // Only parasite if not doing other things
         const dx = bestHost.position.x - c.position.x;
         const dy = bestHost.position.y - c.position.y;
         const dz = bestHost.position.z - c.position.z;
-
-        // Move towards host
-        if (bestDist > 2 + c.size + bestHost.size) {
-          const parasiteSpeed = c.maxForce * (0.5 + c.parasitic * 0.5);
-          c.acceleration.x += (dx / bestDist) * parasiteSpeed;
-          c.acceleration.y += (dy / bestDist) * parasiteSpeed * 0.3;
-          c.acceleration.z += (dz / bestDist) * parasiteSpeed;
-        } else {
-          // Attached to host - drain energy
-          const drainRate = c.parasitic * 3 * (1 - bestHost.armor * 0.5);
-          const drainAmount = drainRate * dt;
-
-          // Check if host's toxicity damages parasite
-          if (bestHost.toxicity > c.toxicity) {
-            const toxicDamage = (bestHost.toxicity - c.toxicity) * 2 * dt;
-            c.energy -= toxicDamage;
-          }
-
-          if (drainAmount > 0 && bestHost.energy > 10) {
-            bestHost.energy -= drainAmount;
-            c.energy += drainAmount * 0.8; // Some energy lost in transfer
-            energyStats.meat += drainAmount * 0.8; // Parasitism counts as meat/blood
-
-            // Follow host movement
-            c.position.x = bestHost.position.x + (dx / bestDist) * (c.size + bestHost.size) * 0.5;
-            c.position.y = bestHost.position.y + (dy / bestDist) * (c.size + bestHost.size) * 0.5;
-            c.position.z = bestHost.position.z + (dz / bestDist) * (c.size + bestHost.size) * 0.5;
-          }
+        if (bestHostDist > 2) {
+          const parasiteSpeed = c.maxForce * (0.3 + c.parasitic * 0.5);
+          c.acceleration.x += (dx / bestHostDist) * parasiteSpeed;
+          c.acceleration.y += (dy / bestHostDist) * parasiteSpeed * 0.2;
+          c.acceleration.z += (dz / bestHostDist) * parasiteSpeed;
+        }
+        if (bestHostDist < 2 + c.size + bestHost.size) {
+          const drainRate = 3 + c.parasitic * 10;
+          const drained = Math.min(bestHost.energy * 0.1, drainRate * dt * 10);
+          const damageReduction = 1 - bestHost.armor * 0.5;
+          const actualDrain = drained * damageReduction;
+          bestHost.energy -= actualDrain;
+          c.energy += actualDrain * 0.7;
+          if (actualDrain > 0.5) energyStats.meat += actualDrain * 0.5;
         }
       }
     }
+    // === END UNIFIED CREATURE INTERACTIONS ===
 
-    // Separation behavior - creatures avoid crowding each other
-    // ALSO: Prey creatures flee from nearby predators
-    const separationRange = 5 + c.size * 3;
-    const nearbyForSeparation = creatureSpatialGrid.getNearby(c.position.x, c.position.z, 1);
-    let separationX = 0;
-    let separationZ = 0;
-    let separationCount = 0;
-    
-    // Escape behavior
-    let fleeX = 0;
-    let fleeZ = 0;
-    let fleeCount = 0;
+    // Separation/flee - only check on staggered frames (not critical to do every frame)
+    if (c.shouldDoExpensiveUpdate()) {
+      const separationRange = 5 + c.size * 3;
+      const nearbyForSeparation = creatureSpatialGrid.getNearby(c.position.x, c.position.z, 1);
+      let separationX = 0, separationZ = 0, separationCount = 0;
+      let fleeX = 0, fleeZ = 0, fleeCount = 0;
 
-    for (const other of nearbyForSeparation) {
-      if (other === c || other.dead) continue;
+      for (const other of nearbyForSeparation) {
+        if (other === c || other.dead) continue;
+        const dx = c.position.x - other.position.x;
+        const dz = c.position.z - other.position.z;
+        const distSq = dx * dx + dz * dz;
+        if (distSq < 0.01) continue;
+        const dist = Math.sqrt(distSq);
 
-      const dx = c.position.x - other.position.x;
-      const dy = c.position.y - other.position.y;
-      const dz = c.position.z - other.position.z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      
-      // Flee from predators if you're not a predator yourself
-      if (other.predatory > 0.4 && c.predatory < 0.3 && dist < 15 + c.sight * 20) {
-        // Flee! Speed and maneuverability help escape
-        const fleeStrength = (1 + c.speed * 2 + c.maneuverability) * 2;
-        fleeX += (dx / dist) * fleeStrength;
-        fleeZ += (dz / dist) * fleeStrength;
-        fleeCount++;
+        // Flee from predators
+        if (other.predatory > 0.4 && c.predatory < 0.3 && dist < 15 + c.sight * 20) {
+          const fleeStrength = (1 + c.speed * 2 + c.maneuverability) * 2;
+          fleeX += (dx / dist) * fleeStrength;
+          fleeZ += (dz / dist) * fleeStrength;
+          fleeCount++;
+        }
+
+        if (dist < separationRange) {
+          const strength = (separationRange - dist) / separationRange;
+          separationX += (dx / dist) * strength;
+          separationZ += (dz / dist) * strength;
+          separationCount++;
+        }
       }
 
-      if (dist < separationRange && dist > 0.1) {
-        // Push away from nearby creatures, stronger when closer
-        const strength = (separationRange - dist) / separationRange;
-        separationX += (dx / dist) * strength;
-        separationZ += (dz / dist) * strength;
-        separationCount++;
+      // Store for next frames (persist acceleration)
+      if (fleeCount > 0) {
+        c.acceleration.x += fleeX * 0.08;
+        c.acceleration.z += fleeZ * 0.08;
+      }
+      if (separationCount > 0) {
+        c.acceleration.x += separationX * 0.02;
+        c.acceleration.z += separationZ * 0.02;
       }
     }
-    
-    // Apply flee force (stronger than separation)
-    if (fleeCount > 0) {
-      const fleeForce = 0.08; // Much stronger than separation
-      c.acceleration.x += fleeX * fleeForce;
-      c.acceleration.z += fleeZ * fleeForce;
-    }
 
-    if (separationCount > 0) {
-      // Apply separation force
-      const sepForce = 0.02;
-      c.acceleration.x += separationX * sepForce;
-      c.acceleration.z += separationZ * sepForce;
-    }
-
-    // Foraging behavior - hungry creatures actively seek plants
-    if (c.predatory < 0.7) {
-      // Use senses to find food
+    // Foraging behavior - hungry creatures actively seek plants (staggered)
+    if (c.predatory < 0.7 && c.shouldDoExpensiveUpdate()) {
       const waterDepth = isInWater ? Math.abs(terrainHeight) : 0;
-      const foodSenseRange = c.getSenseRange(isInWater, waterDepth) * 0.7; // Shorter range for food
+      const foodSenseRange = c.getSenseRange(isInWater, waterDepth) * 0.7;
       const gridRange = Math.ceil(foodSenseRange / 50) + 1;
       const nearbyPlants = spatialGrid.getNearby(c.position.x, c.position.z, gridRange);
 
@@ -1759,8 +1760,14 @@ function update(dt) {
       }
     }
 
+    const tInteractionsEnd = performance.now();
+    tInteractionsAccum += tInteractionsEnd - tPhysicsEnd;
+
     // Update creature logic
     const offspring = c.update(dt, currentBiome);
+
+    const tUpdateEnd = performance.now();
+    tUpdateAccum += tUpdateEnd - tInteractionsEnd;
 
     // Re-enforce terrain collision after update
     // Ensure they stay ON the surface if they are close to it
@@ -1777,26 +1784,9 @@ function update(dt) {
       if (creatures.length < SIMULATION_CONFIG.maxCreatures) {
         newCreatures.push(offspring);
       } else {
-        // Find weakest (natural selection pressure)
-        let weakestIdx = 0;
-        let lowestFitness = Infinity;
-        for (let k = 0; k < creatures.length; k++) {
-          // Fitness = energy + youth bonus
-          const ageRatio = creatures[k].age / creatures[k].maxAge;
-          const fitness = creatures[k].energy * (1 - ageRatio * 0.5);
-          if (fitness < lowestFitness) {
-            lowestFitness = fitness;
-            weakestIdx = k;
-          }
-        }
-        const weakest = creatures[weakestIdx];
-        deadCreatureIds.push(weakest.id);
-        // Create corpse from culled creature
-        const corpse = new WorkerCorpse(weakest, nextCorpseId++);
-        corpses.push(corpse);
-        newCorpses.push(corpse.toData());
-        creatures.splice(weakestIdx, 1);
-        newCreatures.push(offspring);
+        // At max capacity - just skip this birth (natural population pressure)
+        // The old approach of finding weakest was O(n) per birth = O(n²) total
+        // Instead, population will naturally stabilize through starvation/predation
       }
     }
 
@@ -1809,6 +1799,12 @@ function update(dt) {
       creatures.splice(i, 1);
     }
   }
+  const tCreature1 = performance.now();
+  perfTotalCreatureLoop += tCreature1 - tCreature0;
+  // Store granular breakdown for logging
+  perfCreatureUpdate += tUpdateAccum;
+  perfCreaturePhysics += tPhysicsAccum;
+  perfCreatureInteractions += tInteractionsAccum;
 
   // Add new creatures
   creatures.push(...newCreatures);
@@ -1836,6 +1832,7 @@ function update(dt) {
   }
 
   // Update plants with biome info for photosynthesis
+  const tPlant0 = performance.now();
   const deadPlantIds = [];
   const newPlants = [];  // Track new plants for this frame
   const plantOffspring = [];  // Seeds from reproducing plants
@@ -2010,6 +2007,9 @@ function update(dt) {
     // Predators are obligate carnivores - they cannot digest plants
     if (c.predatory > 0.5) continue; // Predators can't eat plants
 
+    // Stagger plant collision checks - only check every 4 frames per creature
+    if (!c.shouldDoExpensiveUpdate()) continue;
+
     const nearbyPlants = spatialGrid.getNearby(c.position.x, c.position.z, 1);
 
     for (const p of nearbyPlants) {
@@ -2153,11 +2153,49 @@ function update(dt) {
     newPlants.push(plant.toData());
   }
 
+  const tPlant1 = performance.now();
+  perfTotalPlantLoop += tPlant1 - tPlant0;
+
+  // Measure simulation time (before serialization)
+  const tSimEnd = performance.now();
+  const simTime = tSimEnd - t0;
+
+  // Serialize all entities
+  const tSerializeStart = performance.now();
+  const creatureData = creatures.map(c => c.toUpdateData());
+  const plantData = plants.map(p => p.toData());
+  const corpseData = corpses.map(c => c.toData());
+  const tSerializeEnd = performance.now();
+  const serializeTime = tSerializeEnd - tSerializeStart;
+
+  // Performance logging every 2 seconds
+  perfUpdateCount++;
+  perfTotalSimTime += simTime;
+  perfTotalSerializeTime += serializeTime;
+
+  if (tSerializeEnd - perfLastLog > 2000) {
+    const n = perfUpdateCount;
+    console.log(`[Worker Perf] Updates: ${n}, Total sim: ${(perfTotalSimTime / n).toFixed(1)}ms, Serialize: ${(perfTotalSerializeTime / n).toFixed(1)}ms`);
+    console.log(`[Worker Perf] Breakdown - Grid: ${(perfTotalGridTime / n).toFixed(1)}ms, Creatures: ${(perfTotalCreatureLoop / n).toFixed(1)}ms, Plants: ${(perfTotalPlantLoop / n).toFixed(1)}ms`);
+    console.log(`[Worker Perf] Creature detail - Physics: ${(perfCreaturePhysics / n).toFixed(1)}ms, Interactions: ${(perfCreatureInteractions / n).toFixed(1)}ms, Update: ${(perfCreatureUpdate / n).toFixed(1)}ms`);
+    console.log(`[Worker Perf] Counts - Creatures: ${creatures.length}, Plants: ${plants.length}, Corpses: ${corpses.length}`);
+    perfLastLog = tSerializeEnd;
+    perfUpdateCount = 0;
+    perfTotalSimTime = 0;
+    perfTotalSerializeTime = 0;
+    perfTotalGridTime = 0;
+    perfTotalCreatureLoop = 0;
+    perfTotalPlantLoop = 0;
+    perfCreaturePhysics = 0;
+    perfCreatureInteractions = 0;
+    perfCreatureUpdate = 0;
+  }
+
   return {
-    // Send minimal update data for existing creatures (~100 bytes each vs ~3KB)
-    creatures: creatures.map(c => c.toUpdateData()),
-    plants: plants.map(p => p.toData()),
-    corpses: corpses.map(c => c.toData()),
+    // Send all entities (no culling - culling happens on main thread)
+    creatures: creatureData,
+    plants: plantData,
+    corpses: corpseData,
     newPlants,
     newCorpses,
     deadCreatureIds,
@@ -2208,6 +2246,43 @@ function update(dt) {
   };
 }
 
+// Write all entity positions to shared buffer (zero-copy transfer)
+function writeToSharedBuffer() {
+  if (!sharedBuffer) return;
+
+  // Mark buffer as being written
+  Atomics.store(sharedBuffer.header, HEADER.FRAME_READY, 0);
+
+  // Write counts
+  const creatureCount = Math.min(creatures.length, MAX_CREATURES);
+  const plantCount = Math.min(plants.length, MAX_PLANTS);
+  const corpseCount = Math.min(corpses.length, MAX_CORPSES);
+
+  sharedBuffer.header[HEADER.CREATURE_COUNT] = creatureCount;
+  sharedBuffer.header[HEADER.PLANT_COUNT] = plantCount;
+  sharedBuffer.header[HEADER.CORPSE_COUNT] = corpseCount;
+
+  // Write creatures directly to typed array
+  for (let i = 0; i < creatureCount; i++) {
+    writeCreature(sharedBuffer.creatures, i, creatures[i]);
+  }
+
+  // Write plants directly to typed array
+  for (let i = 0; i < plantCount; i++) {
+    writePlant(sharedBuffer.plants, i, plants[i]);
+  }
+
+  // Write corpses directly to typed array
+  for (let i = 0; i < corpseCount; i++) {
+    writeCorpse(sharedBuffer.corpses, i, corpses[i]);
+  }
+
+  // Increment frame number and signal ready
+  sharedBuffer.header[HEADER.FRAME_NUMBER]++;
+  Atomics.store(sharedBuffer.header, HEADER.FRAME_READY, 1);
+  Atomics.notify(sharedBuffer.header, HEADER.FRAME_READY);
+}
+
 // Message handler
 self.onmessage = function(e) {
   const { type, data } = e.data;
@@ -2231,8 +2306,26 @@ self.onmessage = function(e) {
       });
       break;
 
+    case 'setSharedBuffer':
+      // Receive SharedArrayBuffer from main thread
+      sharedBuffer = attachSharedBuffer(data.buffer);
+      useSharedBuffer = true;
+      console.log('Worker: SharedArrayBuffer attached');
+      self.postMessage({ type: 'sharedBufferReady' });
+      break;
+
     case 'update':
-      const result = update(data.dt);
+      // Pass camera position for distance-based culling
+      // Worker pre-culls entities by distance, dramatically reducing data transfer
+      const result = update(
+        data.dt,
+        data.cameraX || 0,
+        data.cameraY || 0,
+        data.cameraZ || 0,
+        data.cullDistance || 300
+      );
+
+      // Send only nearby entities (already culled in update())
       self.postMessage({ type: 'update', data: result });
       break;
   }

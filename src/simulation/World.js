@@ -3,6 +3,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { createNoise2D } from 'simplex-noise';
 import { UI } from './UI.js';
 import { WORLD_SIZE, BIOMES } from './Constants.js';
+// SharedBuffer imports - kept for potential future optimization
+// import { createSharedBuffer, readCreature, readPlant, readCorpse, HEADER, BUFFER_SIZE_MB } from './SharedBuffer.js';
 
 // Shared geometries and materials for performance
 const SharedGeometries = {
@@ -32,14 +34,12 @@ const SharedGeometries = {
   lodSphere: new THREE.IcosahedronGeometry(1, 1), // Lower poly for LOD
 };
 
-// LOD Configuration
+// Rendering Configuration
 const LOD_CONFIG = {
-  detailDistance: 80,    // Full detail within this distance
-  lodDistance: 200,      // LOD spheres between detail and this distance
-  cullDistance: 250,     // Don't render beyond this (fog hides pop-in)
-  maxDetailedCreatures: 100, // Max creatures with full detail at once
-  maxLodCreatures: 2000, // Max LOD spheres to render at once
-  poolSize: 150,         // Size of creature renderer pool
+  detailDistance: 100,   // Full detail within this distance
+  cullDistance: 500,     // Don't render beyond this
+  maxDetailedCreatures: 200, // Max detailed creatures
+  maxVisibleCreatures: 10000, // Max total creatures to render
 };
 
 // Shared materials cache for creatures (reduces material instances)
@@ -1556,6 +1556,7 @@ class LODCreatureManager {
     // Frustum for culling
     this._frustum = new THREE.Frustum();
     this._projScreenMatrix = new THREE.Matrix4();
+    this._boundingSphere = new THREE.Sphere(); // For sphere-based frustum check
 
     // Stats
     this.stats = {
@@ -1592,6 +1593,11 @@ class LODCreatureManager {
 
     this.lodMesh.instanceMatrix.needsUpdate = true;
     this.lodMesh.count = 0; // Start with no visible instances (updated dynamically)
+
+    // IMPORTANT: Disable Three.js frustum culling - instances are spread across world
+    // Three.js uses a single bounding sphere for entire InstancedMesh which doesn't work
+    this.lodMesh.frustumCulled = false;
+
     this.scene.add(this.lodMesh);
   }
 
@@ -1666,56 +1672,52 @@ class LODCreatureManager {
     this.stats.lod = 0;
     this.stats.culled = 0;
 
-    // Track which creatures should be detailed vs LOD
+    // Track detailed vs LOD creatures
     const shouldBeDetailed = new Set();
     const shouldBeLod = new Set();
+    let totalVisible = 0;
     let detailedCount = 0;
 
     for (const { data: updateData, distance } of creaturesWithDistance) {
+      // Cap total visible creatures
+      if (totalVisible >= LOD_CONFIG.maxVisibleCreatures) {
+        this.stats.culled++;
+        continue;
+      }
+
       // Merge update data with cached full data (if exists)
       let data;
       if (this.knownCreatures.has(updateData.id)) {
-        // Merge minimal update data into cached full data
         const cached = this.creatureData.get(updateData.id);
         Object.assign(cached, updateData);
         data = cached;
       } else {
-        // Unknown creature - use update data directly (shouldn't happen normally)
         data = updateData;
         this.creatureData.set(data.id, data);
       }
 
-      // Check frustum culling (approximate with sphere)
-      const scale = 0.8 + (data.size || 0.5) * 1.2;
-      this._position.set(data.position.x, data.position.y, data.position.z);
-
-      // Simple frustum check
-      const inFrustum = this._frustum.containsPoint(this._position) ||
-        distance < LOD_CONFIG.detailDistance; // Always render very close ones
-
-      if (!inFrustum || distance > LOD_CONFIG.cullDistance) {
-        // Culled - make sure it's not rendered
+      // Simple distance-based culling only (no frustum culling for consistency)
+      if (distance > LOD_CONFIG.cullDistance) {
         this.stats.culled++;
-        this.hideCreature(data.id);
         continue;
       }
 
-      // Decide LOD level (with limits)
+      // Close creatures get detailed rendering
       if (distance < LOD_CONFIG.detailDistance && detailedCount < LOD_CONFIG.maxDetailedCreatures) {
         shouldBeDetailed.add(data.id);
         detailedCount++;
+        totalVisible++;
         this.stats.detailed++;
-      } else if (distance < LOD_CONFIG.cullDistance && shouldBeLod.size < LOD_CONFIG.maxLodCreatures) {
-        shouldBeLod.add(data.id);
-        this.stats.lod++;
       } else {
-        this.stats.culled++;
-        this.hideCreature(data.id);
+        // Far creatures get LOD spheres
+        shouldBeLod.add(data.id);
+        totalVisible++;
+        this.stats.lod++;
       }
     }
 
-    // Transition creatures between LOD levels
-    this.updateLodTransitions(shouldBeDetailed, shouldBeLod, dt);
+    // Update creatures with LOD transitions
+    this.updateWithLod(shouldBeDetailed, shouldBeLod, dt);
 
     // Update instance matrices
     this.lodMesh.instanceMatrix.needsUpdate = true;
@@ -1727,13 +1729,25 @@ class LODCreatureManager {
     this.lodMesh.count = this.lodInstanceCount;
   }
 
-  updateLodTransitions(shouldBeDetailed, shouldBeLod, dt) {
-    // Handle creatures that should be detailed
+  // Update creatures with detailed rendering for close ones, LOD for far ones
+  updateWithLod(shouldBeDetailed, shouldBeLod, dt) {
+    // Collect LOD IDs to remove (creatures that are now detailed or culled)
+    const toRemoveLod = [];
+    for (const [id] of this.lodCreatureIndices) {
+      if (!shouldBeLod.has(id)) {
+        toRemoveLod.push(id);
+      }
+    }
+    for (const id of toRemoveLod) {
+      this.removeLodInstance(id);
+    }
+
+    // Update detailed creatures
     for (const id of shouldBeDetailed) {
       const data = this.creatureData.get(id);
       if (!data) continue;
 
-      // If currently LOD, transition to detailed
+      // Remove from LOD if it was there
       if (this.lodCreatureIndices.has(id)) {
         this.removeLodInstance(id);
       }
@@ -1749,23 +1763,22 @@ class LODCreatureManager {
       renderer.updateFromData(data, dt);
     }
 
-    // Handle creatures that should be LOD
+    // Update LOD creatures
     for (const id of shouldBeLod) {
       const data = this.creatureData.get(id);
       if (!data) continue;
 
-      // If currently detailed, transition to LOD
+      // Hide detailed renderer if it exists
       if (this.activeRenderers.has(id)) {
         const renderer = this.activeRenderers.get(id);
         this.releaseRenderer(renderer);
         this.activeRenderers.delete(id);
       }
 
-      // Update or create LOD instance
       this.updateLodInstance(data);
     }
 
-    // Hide any detailed renderers that shouldn't be visible
+    // Hide detailed renderers that are no longer needed
     for (const [id, renderer] of this.activeRenderers) {
       if (!shouldBeDetailed.has(id)) {
         this.releaseRenderer(renderer);
@@ -1922,8 +1935,8 @@ class InstancedPlantRenderer {
     this.landIndices = []; // Available indices for land plants
     this.time = 0;
 
-    // Culling settings - use detailDistance to match creature visibility
-    this.cullDistance = LOD_CONFIG.detailDistance;
+    // Culling settings - use cullDistance to match creature visibility
+    this.cullDistance = LOD_CONFIG.cullDistance;
     this.camera = null; // Set by World
 
     // Shared geometry for all plants
@@ -1987,6 +2000,7 @@ class InstancedPlantRenderer {
     // Frustum for view culling
     this._frustum = new THREE.Frustum();
     this._projScreenMatrix = new THREE.Matrix4();
+    this._boundingSphere = new THREE.Sphere(); // For sphere-based frustum check
   }
 
   setCamera(camera) {
@@ -2139,9 +2153,10 @@ class InstancedPlantRenderer {
       const dz = plantInfo.position.z - this._cameraPos.z;
       const distSq = dx * dx + dy * dy + dz * dz;
 
-      // Check if in frustum (view)
+      // Check if in frustum using sphere intersection (prevents edge popping)
       this._position.set(plantInfo.position.x, plantInfo.position.y, plantInfo.position.z);
-      const inFrustum = this._frustum.containsPoint(this._position);
+      this._boundingSphere.set(this._position, 3); // 3 unit radius for plants
+      const inFrustum = this._frustum.intersectsSphere(this._boundingSphere);
 
       const shouldBeVisible = distSq < cullDistSq && inFrustum;
       const mesh = plantInfo.isWater ? this.waterMesh : this.landMesh;
@@ -2221,6 +2236,10 @@ class InstancedCorpseRenderer {
 
     this.normalMesh.instanceMatrix.needsUpdate = true;
     this.toxicMesh.instanceMatrix.needsUpdate = true;
+
+    // Disable Three.js frustum culling - instances are spread across world
+    this.normalMesh.frustumCulled = false;
+    this.toxicMesh.frustumCulled = false;
 
     scene.add(this.normalMesh);
     scene.add(this.toxicMesh);
@@ -2333,6 +2352,10 @@ export class World {
     this.accumulatedDt = 0; // Accumulate dt while waiting for worker response
     this.lastWorkerData = null;
 
+    // SharedArrayBuffer for zero-copy data transfer (disabled for now - worker culling is the main optimization)
+    // this.sharedBuffer = null;
+    // this.useSharedBuffer = false;
+
     this.initThree();
     this.initTerrain();
     this.initOptimizedRenderers();
@@ -2397,6 +2420,7 @@ export class World {
   }
 
   handleWorkerUpdate(data) {
+    const t0 = performance.now();
     this.lastWorkerData = data;
 
     // First, add new creatures with FULL data (includes DNA, genes, emergentFeatures)
@@ -2406,27 +2430,51 @@ export class World {
       }
     }
 
-    // Update existing creatures with minimal data (position, velocity, energy, etc.)
-    // LOD manager merges this with cached full data
-    this.creatureManager.update(data.creatures, data.deadCreatureIds, 0.016);
-
-    // Update plants using instanced renderer (2 draw calls for all plants!)
-    for (const plantData of data.plants) {
-      this.plantRenderer.updatePlant(plantData, 0.016);
+    // Add new plants
+    if (data.newPlants) {
+      for (const plantData of data.newPlants) {
+        this.plantRenderer.addPlant(plantData);
+      }
     }
 
-    // Remove dead/eaten plants from instanced renderer
-    for (const deadId of data.deadPlantIds) {
-      this.plantRenderer.removePlant(deadId);
+    // Add new corpses
+    if (data.newCorpses) {
+      for (const corpseData of data.newCorpses) {
+        this.corpseRenderer.updateCorpse(corpseData);
+      }
     }
 
-    // Mark plant instance matrices as updated
-    this.plantRenderer.finishUpdate();
+    const t1 = performance.now();
 
-    // Update corpses using instanced renderer
+    // Update creatures
+    if (data.creatures) {
+      this.creatureManager.update(data.creatures, data.deadCreatureIds || [], 0.016);
+    }
+
+    const t2 = performance.now();
+
+    // Update plants
+    if (data.plants) {
+      for (const plantData of data.plants) {
+        this.plantRenderer.updatePlant(plantData, 0.016);
+      }
+    }
+
+    const t3 = performance.now();
+
+    // Update corpses
     if (data.corpses) {
       for (const corpseData of data.corpses) {
         this.corpseRenderer.updateCorpse(corpseData);
+      }
+    }
+
+    const t4 = performance.now();
+
+    // Remove dead/eaten plants from instanced renderer
+    if (data.deadPlantIds) {
+      for (const deadId of data.deadPlantIds) {
+        this.plantRenderer.removePlant(deadId);
       }
     }
 
@@ -2437,14 +2485,39 @@ export class World {
       }
     }
 
-    // Mark corpse instance matrices as updated
+    const t5 = performance.now();
+
+    // Performance logging
+    this._perfUpdateCount = (this._perfUpdateCount || 0) + 1;
+    this._perfTotalNew = (this._perfTotalNew || 0) + (t1 - t0);
+    this._perfTotalCreatures = (this._perfTotalCreatures || 0) + (t2 - t1);
+    this._perfTotalPlants = (this._perfTotalPlants || 0) + (t3 - t2);
+    this._perfTotalCorpses = (this._perfTotalCorpses || 0) + (t4 - t3);
+    this._perfTotalCleanup = (this._perfTotalCleanup || 0) + (t5 - t4);
+    this._perfLastLog = this._perfLastLog || t0;
+
+    if (t5 - this._perfLastLog > 2000) {
+      const n = this._perfUpdateCount;
+      console.log(`[Main Perf] Updates: ${n}, New: ${(this._perfTotalNew/n).toFixed(1)}ms, Creatures: ${(this._perfTotalCreatures/n).toFixed(1)}ms, Plants: ${(this._perfTotalPlants/n).toFixed(1)}ms, Corpses: ${(this._perfTotalCorpses/n).toFixed(1)}ms, Cleanup: ${(this._perfTotalCleanup/n).toFixed(1)}ms`);
+      console.log(`[Main Perf] Data sizes - Creatures: ${data.creatures?.length || 0}, Plants: ${data.plants?.length || 0}, Corpses: ${data.corpses?.length || 0}`);
+      this._perfLastLog = t5;
+      this._perfUpdateCount = 0;
+      this._perfTotalNew = 0;
+      this._perfTotalCreatures = 0;
+      this._perfTotalPlants = 0;
+      this._perfTotalCorpses = 0;
+      this._perfTotalCleanup = 0;
+    }
+
+    // Mark instance matrices as updated
+    this.plantRenderer.finishUpdate();
     this.corpseRenderer.finishUpdate();
 
     // Update UI with stats (pre-calculated by worker, no main thread iteration)
     this.ui.updateStats({
       creatures: this.creatureManager.getAllCreatureData(), // For glossary only
-      plants: data.plants,
-      corpses: data.corpses || [],
+      plants: [], // No longer needed for stats
+      corpses: [],
       stats: data.stats, // All stats pre-calculated by worker
       energySources: data.stats.energySources
     });
@@ -2743,7 +2816,18 @@ export class World {
     // Send accumulated dt to worker if ready and not waiting for response
     if (this.workerReady && !this.pendingUpdate) {
       this.pendingUpdate = true;
-      this.worker.postMessage({ type: 'update', data: { dt: this.accumulatedDt } });
+      // Send camera position for worker-side distance culling
+      const camPos = this.camera.position;
+      this.worker.postMessage({
+        type: 'update',
+        data: {
+          dt: this.accumulatedDt,
+          cameraX: camPos.x,
+          cameraY: camPos.y,
+          cameraZ: camPos.z,
+          cullDistance: LOD_CONFIG.cullDistance
+        }
+      });
       this.accumulatedDt = 0; // Reset after sending
     }
 
