@@ -2289,6 +2289,7 @@ export class World {
     this.worker = null;
     this.workerReady = false;
     this.pendingUpdate = false;
+    this.accumulatedDt = 0; // Accumulate dt while waiting for worker response
     this.lastWorkerData = null;
 
     this.initThree();
@@ -2685,10 +2686,14 @@ export class World {
     // Update plant visibility based on camera position
     this.plantRenderer.updateCulling();
 
-    // Send update to worker if ready and not waiting for response
+    // Accumulate dt for worker (cap to prevent simulation instability)
+    this.accumulatedDt = Math.min(this.accumulatedDt + dt, 0.2);
+
+    // Send accumulated dt to worker if ready and not waiting for response
     if (this.workerReady && !this.pendingUpdate) {
       this.pendingUpdate = true;
-      this.worker.postMessage({ type: 'update', data: { dt } });
+      this.worker.postMessage({ type: 'update', data: { dt: this.accumulatedDt } });
+      this.accumulatedDt = 0; // Reset after sending
     }
 
     // Render
