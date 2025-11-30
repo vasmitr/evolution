@@ -28,6 +28,56 @@ const SharedGeometries = {
   // Emergent feature geometries
   horn: new THREE.ConeGeometry(0.08, 0.4, 6),
   tailSegment: new THREE.CylinderGeometry(0.06, 0.04, 0.2, 6),
+  // LOD geometry for distant creatures
+  lodSphere: new THREE.IcosahedronGeometry(1, 1), // Lower poly for LOD
+};
+
+// LOD Configuration
+const LOD_CONFIG = {
+  detailDistance: 80,    // Full detail within this distance
+  lodDistance: 250,      // LOD spheres between detail and this distance
+  cullDistance: 500,     // Don't render beyond this
+  maxDetailedCreatures: 100, // Max creatures with full detail at once
+  poolSize: 150,         // Size of creature renderer pool
+};
+
+// Shared materials cache for creatures (reduces material instances)
+const SharedMaterials = {
+  cache: new Map(),
+
+  getBodyMaterial(hue, saturation, lightness, hasPattern = false) {
+    // For non-patterned materials, cache and reuse
+    if (!hasPattern) {
+      // Quantize colors to reduce unique materials
+      const qHue = Math.round(hue * 20) / 20;
+      const qSat = Math.round(saturation * 10) / 10;
+      const qLight = Math.round(lightness * 10) / 10;
+      const key = `body_${qHue}_${qSat}_${qLight}`;
+
+      if (!this.cache.has(key)) {
+        const color = new THREE.Color().setHSL(qHue, qSat, qLight);
+        this.cache.set(key, new THREE.MeshStandardMaterial({
+          color,
+          roughness: 0.6,
+          metalness: 0.05
+        }));
+      }
+      return this.cache.get(key);
+    }
+    // Patterned materials need to be unique (shader uniforms)
+    return null;
+  },
+
+  getLimbMaterial(baseColor) {
+    const key = `limb_${baseColor.getHexString()}`;
+    if (!this.cache.has(key)) {
+      this.cache.set(key, new THREE.MeshStandardMaterial({
+        color: baseColor.clone().multiplyScalar(0.7),
+        roughness: 0.7
+      }));
+    }
+    return this.cache.get(key);
+  }
 };
 
 // Rendering-only creature (mesh wrapper)
@@ -1433,113 +1483,799 @@ class CreatureRenderer {
     }
   }
 
+  // Recreate mesh for new creature data (used by object pool)
+  recreateForData(data) {
+    // Clear existing mesh children
+    while (this.mesh.children.length > 0) {
+      const child = this.mesh.children[0];
+      this.mesh.remove(child);
+      if (child.material && !SharedMaterials.cache.has(child.material)) {
+        child.material.dispose();
+      }
+    }
+
+    // Reset state
+    this.id = data.id;
+    this.data = data;
+    this.animTime = 0;
+    this.isEating = false;
+    this.eatingTimer = 0;
+
+    // Rebuild mesh
+    this.createMesh(data);
+  }
+
   dispose() {
     this.mesh.traverse((child) => {
-      // Don't dispose shared geometries
-      if (child.material) child.material.dispose();
+      // Don't dispose shared geometries or cached materials
+      if (child.material && !SharedMaterials.cache.has(child.material)) {
+        child.material.dispose();
+      }
     });
   }
 }
 
-// Rendering-only plant
-class PlantRenderer {
-  constructor(data) {
-    this.id = data.id;
-    this.data = data;
-    this.age = 0;
+// LOD Creature Manager - handles all creatures with distance-based LOD, pooling, and frustum culling
+class LODCreatureManager {
+  constructor(scene, camera, maxCreatures = 5000) {
+    this.scene = scene;
+    this.camera = camera;
+    this.maxCreatures = maxCreatures;
 
-    const geometry = new THREE.TetrahedronGeometry(0.5);
-    // Water plants are brighter/bioluminescent, land plants are normal green
-    const isWater = !data.isOnLand;
-    const material = new THREE.MeshStandardMaterial({
-      color: isWater ? 0x00ffaa : 0x00ff00,  // Cyan-green for water, pure green for land
-      emissive: isWater ? 0x00aa66 : 0x004400,  // Brighter glow underwater
-      emissiveIntensity: isWater ? 0.5 : 0.2
-    });
+    // All creature data from simulation
+    this.creatureData = new Map(); // id -> data
 
-    this.mesh = new THREE.Mesh(geometry, material);
-    this.mesh.position.set(data.position.x, data.position.y, data.position.z);
-    this.mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
-    this.isWater = isWater;
+    // LOD tracking
+    this.detailedCreatures = new Map(); // id -> CreatureRenderer (nearby, full detail)
+    this.lodCreatureIndices = new Map(); // id -> instanceIndex (distant, simple sphere)
+
+    // Object pool for detailed renderers
+    this.rendererPool = [];
+    this.activeRenderers = new Map(); // id -> pooled CreatureRenderer
+
+    // Available LOD instance indices
+    this.availableLodIndices = [];
+
+    // Initialize LOD instanced mesh for distant creatures
+    this.initLodMesh();
+
+    // Initialize renderer pool
+    this.initPool();
+
+    // Reusable objects for calculations
+    this._matrix = new THREE.Matrix4();
+    this._position = new THREE.Vector3();
+    this._quaternion = new THREE.Quaternion();
+    this._scale = new THREE.Vector3();
+    this._color = new THREE.Color();
+    this._cameraPos = new THREE.Vector3();
+
+    // Frustum for culling
+    this._frustum = new THREE.Frustum();
+    this._projScreenMatrix = new THREE.Matrix4();
+
+    // Stats
+    this.stats = {
+      detailed: 0,
+      lod: 0,
+      culled: 0
+    };
   }
 
-  updateFromData(data, dt) {
-    this.data = data;
-    this.age += dt;
+  initLodMesh() {
+    // Create instanced mesh for LOD creatures (simple colored spheres)
+    const geometry = SharedGeometries.lodSphere;
+    const material = new THREE.MeshStandardMaterial({
+      vertexColors: false,
+      roughness: 0.6,
+      metalness: 0.05
+    });
 
-    this.mesh.position.set(data.position.x, data.position.y, data.position.z);
+    this.lodMesh = new THREE.InstancedMesh(geometry, material, this.maxCreatures);
+    this.lodMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
-    // Scale based on energy (plants grow as they photosynthesize)
-    const energyScale = 0.5 + (data.energy / 80) * 0.5;
-    // Pulse effect
-    const pulse = 1 + Math.sin(this.age * 2) * 0.1;
-    this.mesh.scale.setScalar(energyScale * pulse);
+    // Enable per-instance colors
+    this.lodMesh.instanceColor = new THREE.InstancedBufferAttribute(
+      new Float32Array(this.maxCreatures * 3),
+      3
+    );
+    this.lodMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
 
-    // Color intensity based on energy - water plants glow more
-    const intensity = 0.3 + (data.energy / 80) * 0.7;
-    if (this.isWater) {
-      this.mesh.material.emissive.setRGB(0, intensity * 0.5, intensity * 0.3);
+    // Initialize all instances as invisible (zero scale)
+    const zeroMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (let i = 0; i < this.maxCreatures; i++) {
+      this.lodMesh.setMatrixAt(i, zeroMatrix);
+      this.availableLodIndices.push(i);
+    }
+
+    this.lodMesh.instanceMatrix.needsUpdate = true;
+    this.lodMesh.count = 0; // Start with no visible instances
+    this.scene.add(this.lodMesh);
+  }
+
+  initPool() {
+    // Pre-create some renderers for the pool
+    // We don't create all upfront - they'll be created on demand and pooled
+    this.poolSize = LOD_CONFIG.poolSize;
+  }
+
+  // Get a renderer from pool or create new one
+  acquireRenderer(data) {
+    let renderer;
+    if (this.rendererPool.length > 0) {
+      renderer = this.rendererPool.pop();
+      renderer.recreateForData(data);
     } else {
-      this.mesh.material.emissive.setRGB(0, intensity * 0.3, 0);
+      renderer = new CreatureRenderer(data);
+    }
+    this.scene.add(renderer.mesh);
+    return renderer;
+  }
+
+  // Return a renderer to the pool
+  releaseRenderer(renderer) {
+    this.scene.remove(renderer.mesh);
+    renderer.mesh.visible = false;
+
+    if (this.rendererPool.length < this.poolSize) {
+      this.rendererPool.push(renderer);
+    } else {
+      // Pool is full, dispose
+      renderer.dispose();
     }
   }
 
+  // Update all creatures with LOD logic
+  update(creaturesData, deadCreatureIds, dt) {
+    // Update frustum
+    this._projScreenMatrix.multiplyMatrices(
+      this.camera.projectionMatrix,
+      this.camera.matrixWorldInverse
+    );
+    this._frustum.setFromProjectionMatrix(this._projScreenMatrix);
+    this.camera.getWorldPosition(this._cameraPos);
+
+    // Process dead creatures first
+    for (const deadId of deadCreatureIds) {
+      this.removeCreature(deadId);
+    }
+
+    // Calculate distances and sort by distance
+    const creaturesWithDistance = [];
+    for (const data of creaturesData) {
+      const dx = data.position.x - this._cameraPos.x;
+      const dy = data.position.y - this._cameraPos.y;
+      const dz = data.position.z - this._cameraPos.z;
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      creaturesWithDistance.push({ data, distance });
+    }
+
+    // Sort by distance (closest first)
+    creaturesWithDistance.sort((a, b) => a.distance - b.distance);
+
+    // Reset stats
+    this.stats.detailed = 0;
+    this.stats.lod = 0;
+    this.stats.culled = 0;
+
+    // Track which creatures should be detailed vs LOD
+    const shouldBeDetailed = new Set();
+    const shouldBeLod = new Set();
+    let detailedCount = 0;
+
+    for (const { data, distance } of creaturesWithDistance) {
+      // Store/update creature data
+      this.creatureData.set(data.id, data);
+
+      // Check frustum culling (approximate with sphere)
+      const scale = 0.8 + data.size * 1.2;
+      this._position.set(data.position.x, data.position.y, data.position.z);
+
+      // Simple frustum check
+      const inFrustum = this._frustum.containsPoint(this._position) ||
+        distance < LOD_CONFIG.detailDistance; // Always render very close ones
+
+      if (!inFrustum || distance > LOD_CONFIG.cullDistance) {
+        // Culled - make sure it's not rendered
+        this.stats.culled++;
+        this.hideCreature(data.id);
+        continue;
+      }
+
+      // Decide LOD level
+      if (distance < LOD_CONFIG.detailDistance && detailedCount < LOD_CONFIG.maxDetailedCreatures) {
+        shouldBeDetailed.add(data.id);
+        detailedCount++;
+        this.stats.detailed++;
+      } else if (distance < LOD_CONFIG.cullDistance) {
+        shouldBeLod.add(data.id);
+        this.stats.lod++;
+      } else {
+        this.stats.culled++;
+        this.hideCreature(data.id);
+      }
+    }
+
+    // Transition creatures between LOD levels
+    this.updateLodTransitions(shouldBeDetailed, shouldBeLod, dt);
+
+    // Update instance matrices
+    this.lodMesh.instanceMatrix.needsUpdate = true;
+    if (this.lodMesh.instanceColor) {
+      this.lodMesh.instanceColor.needsUpdate = true;
+    }
+
+    // Update visible instance count
+    this.lodMesh.count = this.maxCreatures - this.availableLodIndices.length;
+  }
+
+  updateLodTransitions(shouldBeDetailed, shouldBeLod, dt) {
+    // Handle creatures that should be detailed
+    for (const id of shouldBeDetailed) {
+      const data = this.creatureData.get(id);
+      if (!data) continue;
+
+      // If currently LOD, transition to detailed
+      if (this.lodCreatureIndices.has(id)) {
+        this.removeLodInstance(id);
+      }
+
+      // Get or create detailed renderer
+      let renderer = this.activeRenderers.get(id);
+      if (!renderer) {
+        renderer = this.acquireRenderer(data);
+        this.activeRenderers.set(id, renderer);
+      }
+
+      renderer.mesh.visible = true;
+      renderer.updateFromData(data, dt);
+    }
+
+    // Handle creatures that should be LOD
+    for (const id of shouldBeLod) {
+      const data = this.creatureData.get(id);
+      if (!data) continue;
+
+      // If currently detailed, transition to LOD
+      if (this.activeRenderers.has(id)) {
+        const renderer = this.activeRenderers.get(id);
+        this.releaseRenderer(renderer);
+        this.activeRenderers.delete(id);
+      }
+
+      // Update or create LOD instance
+      this.updateLodInstance(data);
+    }
+
+    // Hide any detailed renderers that shouldn't be visible
+    for (const [id, renderer] of this.activeRenderers) {
+      if (!shouldBeDetailed.has(id)) {
+        this.releaseRenderer(renderer);
+        this.activeRenderers.delete(id);
+      }
+    }
+  }
+
+  updateLodInstance(data) {
+    let index = this.lodCreatureIndices.get(data.id);
+
+    if (index === undefined) {
+      // Allocate new LOD index
+      if (this.availableLodIndices.length === 0) return;
+      index = this.availableLodIndices.pop();
+      this.lodCreatureIndices.set(data.id, index);
+    }
+
+    // Calculate transform
+    const scale = 0.8 + data.size * 1.2;
+    this._position.set(data.position.x, data.position.y, data.position.z);
+    this._scale.set(scale, scale, scale);
+
+    // Simple rotation from velocity
+    if (data.velocity) {
+      const vel = new THREE.Vector3(data.velocity.x, data.velocity.y, data.velocity.z);
+      if (vel.lengthSq() > 0.0001) {
+        const m = new THREE.Matrix4().lookAt(vel, new THREE.Vector3(), new THREE.Vector3(0, 1, 0));
+        this._quaternion.setFromRotationMatrix(m);
+      } else {
+        this._quaternion.identity();
+      }
+    } else {
+      this._quaternion.identity();
+    }
+
+    this._matrix.compose(this._position, this._quaternion, this._scale);
+    this.lodMesh.setMatrixAt(index, this._matrix);
+
+    // Set color based on creature's color genes
+    const hue = data.colorHue || 0.33;
+    const saturation = 0.3 + (data.colorSaturation || 0.5) * 0.5;
+    const lightness = 0.35 + (data.colorSaturation || 0.5) * 0.15;
+    this._color.setHSL(hue, saturation, lightness);
+    this.lodMesh.setColorAt(index, this._color);
+  }
+
+  removeLodInstance(id) {
+    const index = this.lodCreatureIndices.get(id);
+    if (index === undefined) return;
+
+    // Set to zero scale (invisible)
+    this._matrix.makeScale(0, 0, 0);
+    this.lodMesh.setMatrixAt(index, this._matrix);
+
+    this.availableLodIndices.push(index);
+    this.lodCreatureIndices.delete(id);
+  }
+
+  hideCreature(id) {
+    // Remove from LOD if present
+    if (this.lodCreatureIndices.has(id)) {
+      this.removeLodInstance(id);
+    }
+
+    // Hide detailed renderer if present
+    if (this.activeRenderers.has(id)) {
+      const renderer = this.activeRenderers.get(id);
+      renderer.mesh.visible = false;
+    }
+  }
+
+  removeCreature(id) {
+    // Remove from data
+    this.creatureData.delete(id);
+
+    // Remove LOD instance
+    this.removeLodInstance(id);
+
+    // Release detailed renderer
+    if (this.activeRenderers.has(id)) {
+      const renderer = this.activeRenderers.get(id);
+      this.releaseRenderer(renderer);
+      this.activeRenderers.delete(id);
+    }
+  }
+
+  getCreatureData(id) {
+    return this.creatureData.get(id);
+  }
+
+  getAllCreatureData() {
+    return Array.from(this.creatureData.values());
+  }
+
+  getStats() {
+    return {
+      ...this.stats,
+      total: this.creatureData.size,
+      pooled: this.rendererPool.length
+    };
+  }
+
   dispose() {
-    if (this.mesh.geometry) this.mesh.geometry.dispose();
-    if (this.mesh.material) this.mesh.material.dispose();
+    // Dispose all active renderers
+    for (const renderer of this.activeRenderers.values()) {
+      renderer.dispose();
+    }
+    this.activeRenderers.clear();
+
+    // Dispose pooled renderers
+    for (const renderer of this.rendererPool) {
+      renderer.dispose();
+    }
+    this.rendererPool = [];
+
+    // Dispose LOD mesh
+    this.scene.remove(this.lodMesh);
+    this.lodMesh.geometry.dispose();
+    this.lodMesh.material.dispose();
   }
 }
 
-// Rendering-only corpse
-class CorpseRenderer {
-  constructor(data) {
-    this.id = data.id;
-    this.data = data;
-    this.initialEnergy = data.energy || 100;
+// Instanced plant renderer - handles all plants with just 2 draw calls
+class InstancedPlantRenderer {
+  constructor(scene, maxPlants = 6000) {
+    this.scene = scene;
+    this.maxPlants = maxPlants;
+    this.plantData = new Map(); // id -> { index, isWater, age, position }
+    this.waterIndices = []; // Available indices for water plants
+    this.landIndices = []; // Available indices for land plants
+    this.time = 0;
 
-    // Corpses are darker, decaying versions of creatures
-    // Use unit sphere, scale based on creature size
+    // Culling settings - use detailDistance to match creature visibility
+    this.cullDistance = LOD_CONFIG.detailDistance;
+    this.camera = null; // Set by World
+
+    // Shared geometry for all plants
+    const geometry = new THREE.TetrahedronGeometry(0.5);
+
+    // Water plants - cyan-green, brighter glow
+    const waterMaterial = new THREE.MeshStandardMaterial({
+      color: 0x00ffaa,
+      emissive: 0x00aa66,
+      emissiveIntensity: 0.5
+    });
+
+    // Land plants - pure green, dimmer
+    const landMaterial = new THREE.MeshStandardMaterial({
+      color: 0x00ff00,
+      emissive: 0x004400,
+      emissiveIntensity: 0.2
+    });
+
+    // Create instanced meshes - 70% water, 30% land estimate
+    const waterCount = Math.floor(maxPlants * 0.7);
+    const landCount = maxPlants - waterCount;
+
+    this.waterMesh = new THREE.InstancedMesh(geometry, waterMaterial, waterCount);
+    this.landMesh = new THREE.InstancedMesh(geometry, landMaterial, landCount);
+
+    // Use dynamic draw for frequently updated matrices
+    this.waterMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.landMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+    // Initialize with zero scale (invisible)
+    const zeroMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (let i = 0; i < waterCount; i++) {
+      this.waterMesh.setMatrixAt(i, zeroMatrix);
+      this.waterIndices.push(i);
+    }
+    for (let i = 0; i < landCount; i++) {
+      this.landMesh.setMatrixAt(i, zeroMatrix);
+      this.landIndices.push(i);
+    }
+
+    this.waterMesh.instanceMatrix.needsUpdate = true;
+    this.landMesh.instanceMatrix.needsUpdate = true;
+
+    // Disable Three.js frustum culling - we do our own distance-based culling per instance
+    // Three.js frustum culling uses a single bounding sphere for the entire InstancedMesh,
+    // which doesn't work well when instances are spread across the world
+    this.waterMesh.frustumCulled = false;
+    this.landMesh.frustumCulled = false;
+
+    scene.add(this.waterMesh);
+    scene.add(this.landMesh);
+
+    // Reusable objects for matrix calculations
+    this._matrix = new THREE.Matrix4();
+    this._position = new THREE.Vector3();
+    this._quaternion = new THREE.Quaternion();
+    this._scale = new THREE.Vector3();
+    this._cameraPos = new THREE.Vector3();
+
+    // Frustum for view culling
+    this._frustum = new THREE.Frustum();
+    this._projScreenMatrix = new THREE.Matrix4();
+  }
+
+  setCamera(camera) {
+    this.camera = camera;
+  }
+
+  addPlant(data) {
+    const isWater = !data.isOnLand;
+    const indices = isWater ? this.waterIndices : this.landIndices;
+
+    if (indices.length === 0) {
+      return false;
+    }
+
+    const index = indices.pop();
+    const mesh = isWater ? this.waterMesh : this.landMesh;
+
+    // Check if plant is within visible range
+    let isVisible = true;
+    if (this.camera) {
+      this.camera.getWorldPosition(this._cameraPos);
+      const dx = data.position.x - this._cameraPos.x;
+      const dy = data.position.y - this._cameraPos.y;
+      const dz = data.position.z - this._cameraPos.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      isVisible = distSq < this.cullDistance * this.cullDistance;
+    }
+
+    // Store plant data with position for distance checking
+    this.plantData.set(data.id, {
+      index,
+      isWater,
+      age: 0,
+      position: { x: data.position.x, y: data.position.y, z: data.position.z },
+      rotation: new THREE.Euler(
+        Math.random() * Math.PI,
+        Math.random() * Math.PI,
+        Math.random() * Math.PI
+      ),
+      visible: isVisible
+    });
+
+    // Set initial transform (hidden if outside cull distance)
+    this.updatePlantMatrix(data, mesh, index, 0, isVisible);
+
+    return true;
+  }
+
+  updatePlant(data, dt) {
+    const plantInfo = this.plantData.get(data.id);
+    if (!plantInfo) {
+      return this.addPlant(data);
+    }
+
+    // Update stored position
+    plantInfo.position.x = data.position.x;
+    plantInfo.position.y = data.position.y;
+    plantInfo.position.z = data.position.z;
+
+    // Check distance from camera for culling
+    let shouldUpdate = true;
+    if (this.camera) {
+      this.camera.getWorldPosition(this._cameraPos);
+      const dx = data.position.x - this._cameraPos.x;
+      const dy = data.position.y - this._cameraPos.y;
+      const dz = data.position.z - this._cameraPos.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      shouldUpdate = distSq < this.cullDistance * this.cullDistance;
+    }
+
+    const mesh = plantInfo.isWater ? this.waterMesh : this.landMesh;
+
+    if (shouldUpdate) {
+      plantInfo.age += dt;
+      plantInfo.visible = true;
+      this.updatePlantMatrix(data, mesh, plantInfo.index, plantInfo.age, true);
+    } else if (plantInfo.visible) {
+      // Hide plant - set to zero scale
+      plantInfo.visible = false;
+      this._matrix.makeScale(0, 0, 0);
+      mesh.setMatrixAt(plantInfo.index, this._matrix);
+    }
+    // If already hidden, skip entirely
+
+    return true;
+  }
+
+  updatePlantMatrix(data, mesh, index, age, visible) {
+    if (!visible) {
+      this._matrix.makeScale(0, 0, 0);
+      mesh.setMatrixAt(index, this._matrix);
+      return;
+    }
+
+    const plantInfo = this.plantData.get(data.id);
+
+    // Calculate scale based on energy + pulse
+    const energyScale = 0.5 + (data.energy / 80) * 0.5;
+    const pulse = 1 + Math.sin(age * 2) * 0.1;
+    const scale = energyScale * pulse;
+
+    this._position.set(data.position.x, data.position.y, data.position.z);
+    this._quaternion.setFromEuler(plantInfo.rotation);
+    this._scale.set(scale, scale, scale);
+
+    this._matrix.compose(this._position, this._quaternion, this._scale);
+    mesh.setMatrixAt(index, this._matrix);
+  }
+
+  removePlant(id) {
+    const plantInfo = this.plantData.get(id);
+    if (!plantInfo) return;
+
+    const mesh = plantInfo.isWater ? this.waterMesh : this.landMesh;
+    const indices = plantInfo.isWater ? this.waterIndices : this.landIndices;
+
+    // Set to zero scale (invisible)
+    this._matrix.makeScale(0, 0, 0);
+    mesh.setMatrixAt(plantInfo.index, this._matrix);
+
+    // Return index to pool
+    indices.push(plantInfo.index);
+    this.plantData.delete(id);
+  }
+
+  finishUpdate() {
+    // Mark matrices as needing update
+    this.waterMesh.instanceMatrix.needsUpdate = true;
+    this.landMesh.instanceMatrix.needsUpdate = true;
+  }
+
+  // Update visibility of all plants based on camera frustum and distance (call each frame)
+  updateCulling() {
+    if (!this.camera) return;
+
+    // Update frustum from camera
+    this._projScreenMatrix.multiplyMatrices(
+      this.camera.projectionMatrix,
+      this.camera.matrixWorldInverse
+    );
+    this._frustum.setFromProjectionMatrix(this._projScreenMatrix);
+    this.camera.getWorldPosition(this._cameraPos);
+
+    const cullDistSq = this.cullDistance * this.cullDistance;
+
+    for (const [, plantInfo] of this.plantData) {
+      // Check distance
+      const dx = plantInfo.position.x - this._cameraPos.x;
+      const dy = plantInfo.position.y - this._cameraPos.y;
+      const dz = plantInfo.position.z - this._cameraPos.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+
+      // Check if in frustum (view)
+      this._position.set(plantInfo.position.x, plantInfo.position.y, plantInfo.position.z);
+      const inFrustum = this._frustum.containsPoint(this._position);
+
+      const shouldBeVisible = distSq < cullDistSq && inFrustum;
+      const mesh = plantInfo.isWater ? this.waterMesh : this.landMesh;
+
+      if (shouldBeVisible) {
+        this._quaternion.setFromEuler(plantInfo.rotation);
+        const scale = 0.5 + (plantInfo.energy || 50) / 80 * 0.5;
+        this._scale.set(scale, scale, scale);
+        this._matrix.compose(this._position, this._quaternion, this._scale);
+      } else {
+        this._matrix.makeScale(0, 0, 0);
+      }
+      mesh.setMatrixAt(plantInfo.index, this._matrix);
+    }
+
+    this.waterMesh.instanceMatrix.needsUpdate = true;
+    this.landMesh.instanceMatrix.needsUpdate = true;
+  }
+
+  getPlantCount() {
+    return this.plantData.size;
+  }
+
+  dispose() {
+    this.scene.remove(this.waterMesh);
+    this.scene.remove(this.landMesh);
+    this.waterMesh.geometry.dispose();
+    this.waterMesh.material.dispose();
+    this.landMesh.geometry.dispose();
+    this.landMesh.material.dispose();
+  }
+}
+
+// Instanced corpse renderer - handles all corpses with 2 draw calls (normal + toxic)
+class InstancedCorpseRenderer {
+  constructor(scene, maxCorpses = 500) {
+    this.scene = scene;
+    this.maxCorpses = maxCorpses;
+    this.corpseData = new Map(); // id -> { index, isToxic, baseScale, initialEnergy }
+    this.normalIndices = [];
+    this.toxicIndices = [];
+
+    // Shared geometry
     const geometry = new THREE.SphereGeometry(1, 8, 8);
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x4a3728,  // Brown/decaying color
+
+    // Normal corpse material - brown/decaying
+    const normalMaterial = new THREE.MeshStandardMaterial({
+      color: 0x4a3728,
       roughness: 0.9,
       metalness: 0.0
     });
 
-    this.mesh = new THREE.Mesh(geometry, material);
-    this.mesh.position.set(data.position.x, data.position.y, data.position.z);
+    // Toxic corpse material - purple tint
+    const toxicMaterial = new THREE.MeshStandardMaterial({
+      color: 0x6b3a6b,
+      roughness: 0.9,
+      metalness: 0.0
+    });
 
-    // Base scale from creature size (capped to reasonable range)
-    this.baseScale = Math.min(2, 0.5 + (data.size || 0) * 1.5);
-    this.mesh.scale.setScalar(this.baseScale);
+    // 80% normal, 20% toxic estimate
+    const normalCount = Math.floor(maxCorpses * 0.8);
+    const toxicCount = maxCorpses - normalCount;
 
-    // Toxic corpses have a purple tint
-    if (data.toxicity > 0.3) {
-      material.color.setHex(0x6b3a6b);
+    this.normalMesh = new THREE.InstancedMesh(geometry, normalMaterial, normalCount);
+    this.toxicMesh = new THREE.InstancedMesh(geometry, toxicMaterial, toxicCount);
+
+    // Initialize with zero scale
+    const zeroMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (let i = 0; i < normalCount; i++) {
+      this.normalMesh.setMatrixAt(i, zeroMatrix);
+      this.normalIndices.push(i);
     }
+    for (let i = 0; i < toxicCount; i++) {
+      this.toxicMesh.setMatrixAt(i, zeroMatrix);
+      this.toxicIndices.push(i);
+    }
+
+    this.normalMesh.instanceMatrix.needsUpdate = true;
+    this.toxicMesh.instanceMatrix.needsUpdate = true;
+
+    scene.add(this.normalMesh);
+    scene.add(this.toxicMesh);
+
+    // Reusable objects
+    this._matrix = new THREE.Matrix4();
+    this._position = new THREE.Vector3();
+    this._quaternion = new THREE.Quaternion();
+    this._scale = new THREE.Vector3();
   }
 
-  updateFromData(data) {
-    this.data = data;
-    this.mesh.position.set(data.position.x, data.position.y, data.position.z);
+  addCorpse(data) {
+    const isToxic = data.toxicity > 0.3;
+    const indices = isToxic ? this.toxicIndices : this.normalIndices;
 
-    // Shrink as energy is consumed/decays (relative to initial energy, capped)
-    const energyRatio = Math.min(1, Math.max(0.2, data.energy / this.initialEnergy));
-    this.mesh.scale.setScalar(this.baseScale * energyRatio);
+    if (indices.length === 0) return false;
+
+    const index = indices.pop();
+    const baseScale = Math.min(2, 0.5 + (data.size || 0) * 1.5);
+
+    this.corpseData.set(data.id, {
+      index,
+      isToxic,
+      baseScale,
+      initialEnergy: data.energy || 100
+    });
+
+    this.updateCorpseMatrix(data);
+    return true;
+  }
+
+  updateCorpse(data) {
+    const corpseInfo = this.corpseData.get(data.id);
+    if (!corpseInfo) {
+      return this.addCorpse(data);
+    }
+
+    this.updateCorpseMatrix(data);
+    return true;
+  }
+
+  updateCorpseMatrix(data) {
+    const corpseInfo = this.corpseData.get(data.id);
+    if (!corpseInfo) return;
+
+    const mesh = corpseInfo.isToxic ? this.toxicMesh : this.normalMesh;
+
+    // Shrink as energy decays
+    const energyRatio = Math.min(1, Math.max(0.2, data.energy / corpseInfo.initialEnergy));
+    const scale = corpseInfo.baseScale * energyRatio;
+
+    this._position.set(data.position.x, data.position.y, data.position.z);
+    this._quaternion.identity();
+    this._scale.set(scale, scale, scale);
+
+    this._matrix.compose(this._position, this._quaternion, this._scale);
+    mesh.setMatrixAt(corpseInfo.index, this._matrix);
+  }
+
+  removeCorpse(id) {
+    const corpseInfo = this.corpseData.get(id);
+    if (!corpseInfo) return;
+
+    const mesh = corpseInfo.isToxic ? this.toxicMesh : this.normalMesh;
+    const indices = corpseInfo.isToxic ? this.toxicIndices : this.normalIndices;
+
+    this._matrix.makeScale(0, 0, 0);
+    mesh.setMatrixAt(corpseInfo.index, this._matrix);
+
+    indices.push(corpseInfo.index);
+    this.corpseData.delete(id);
+  }
+
+  finishUpdate() {
+    this.normalMesh.instanceMatrix.needsUpdate = true;
+    this.toxicMesh.instanceMatrix.needsUpdate = true;
   }
 
   dispose() {
-    if (this.mesh.geometry) this.mesh.geometry.dispose();
-    if (this.mesh.material) this.mesh.material.dispose();
+    this.scene.remove(this.normalMesh);
+    this.scene.remove(this.toxicMesh);
+    this.normalMesh.geometry.dispose();
+    this.normalMesh.material.dispose();
+    this.toxicMesh.geometry.dispose();
+    this.toxicMesh.material.dispose();
   }
 }
 
 export class World {
   constructor(container) {
     this.container = container;
-    this.creatureRenderers = new Map(); // id -> CreatureRenderer
-    this.plantRenderers = new Map(); // id -> PlantRenderer
-    this.corpseRenderers = new Map(); // id -> CorpseRenderer
+    // LOD creature manager handles creatures with distance-based detail, pooling, and frustum culling
+    this.creatureManager = null; // LODCreatureManager - initialized after scene/camera
+    // Instanced renderers for plants and corpses (much better performance)
+    this.plantRenderer = null; // InstancedPlantRenderer - initialized after scene
+    this.corpseRenderer = null; // InstancedCorpseRenderer - initialized after scene
     this.time = 0;
     this.noise2D = createNoise2D();
 
@@ -1556,7 +2292,19 @@ export class World {
 
     this.initThree();
     this.initTerrain();
+    this.initOptimizedRenderers();
     this.initWorker();
+  }
+
+  initOptimizedRenderers() {
+    // Create LOD creature manager with frustum culling and object pooling
+    this.creatureManager = new LODCreatureManager(this.scene, this.camera, 5000);
+
+    // Create instanced renderers for plants and corpses
+    // These use InstancedMesh for massive performance gains
+    this.plantRenderer = new InstancedPlantRenderer(this.scene, 8000);
+    this.plantRenderer.setCamera(this.camera); // Enable distance-based culling
+    this.corpseRenderer = new InstancedCorpseRenderer(this.scene, 500);
   }
 
   initWorker() {
@@ -1591,109 +2339,61 @@ export class World {
   }
 
   handleWorkerInit(data) {
-    // Create initial creature renderers
-    for (const creatureData of data.creatures) {
-      const renderer = new CreatureRenderer(creatureData);
-      this.creatureRenderers.set(creatureData.id, renderer);
-      this.scene.add(renderer.mesh);
-    }
+    // Initial creatures will be handled by the first update call
+    // The LODCreatureManager handles all creature lifecycle
 
-    // Create initial plant renderers
+    // Add initial plants to instanced renderer
     for (const plantData of data.plants) {
-      const renderer = new PlantRenderer(plantData);
-      this.plantRenderers.set(plantData.id, renderer);
-      this.scene.add(renderer.mesh);
+      this.plantRenderer.addPlant(plantData);
     }
+    this.plantRenderer.finishUpdate();
 
-    console.log(`Worker initialized: ${data.creatures.length} creatures, ${data.plants.length} plants`);
+    console.log(`Worker initialized: ${data.creatures.length} creatures, ${data.plants.length} plants (LOD + instanced)`);
   }
 
   handleWorkerUpdate(data) {
     this.lastWorkerData = data;
 
-    // Update existing creatures
-    for (const creatureData of data.creatures) {
-      let renderer = this.creatureRenderers.get(creatureData.id);
+    // Update all creatures using LOD manager (handles LOD, frustum culling, object pooling)
+    this.creatureManager.update(data.creatures, data.deadCreatureIds, 0.016);
 
-      if (!renderer) {
-        // New creature (from reproduction)
-        renderer = new CreatureRenderer(creatureData);
-        this.creatureRenderers.set(creatureData.id, renderer);
-        this.scene.add(renderer.mesh);
-      } else {
-        renderer.updateFromData(creatureData, 0.016); // ~60fps dt for animations
-      }
-    }
-
-    // Remove dead creatures
-    for (const deadId of data.deadCreatureIds) {
-      const renderer = this.creatureRenderers.get(deadId);
-      if (renderer) {
-        this.scene.remove(renderer.mesh);
-        renderer.dispose();
-        this.creatureRenderers.delete(deadId);
-      }
-    }
-
-    // Update existing plants
+    // Update plants using instanced renderer (2 draw calls for all plants!)
     for (const plantData of data.plants) {
-      let renderer = this.plantRenderers.get(plantData.id);
-
-      if (!renderer) {
-        // New plant
-        renderer = new PlantRenderer(plantData);
-        this.plantRenderers.set(plantData.id, renderer);
-        this.scene.add(renderer.mesh);
-      } else {
-        renderer.updateFromData(plantData, 0.016); // Approximate dt for animation
-      }
+      this.plantRenderer.updatePlant(plantData, 0.016);
     }
 
-    // Remove dead/eaten plants
+    // Remove dead/eaten plants from instanced renderer
     for (const deadId of data.deadPlantIds) {
-      const renderer = this.plantRenderers.get(deadId);
-      if (renderer) {
-        this.scene.remove(renderer.mesh);
-        renderer.dispose();
-        this.plantRenderers.delete(deadId);
-      }
+      this.plantRenderer.removePlant(deadId);
     }
 
-    // Update existing corpses
+    // Mark plant instance matrices as updated
+    this.plantRenderer.finishUpdate();
+
+    // Update corpses using instanced renderer
     if (data.corpses) {
       for (const corpseData of data.corpses) {
-        let renderer = this.corpseRenderers.get(corpseData.id);
-
-        if (!renderer) {
-          // New corpse
-          renderer = new CorpseRenderer(corpseData);
-          this.corpseRenderers.set(corpseData.id, renderer);
-          this.scene.add(renderer.mesh);
-        } else {
-          renderer.updateFromData(corpseData);
-        }
+        this.corpseRenderer.updateCorpse(corpseData);
       }
     }
 
-    // Remove decayed/eaten corpses
+    // Remove decayed/eaten corpses from instanced renderer
     if (data.deadCorpseIds) {
       for (const deadId of data.deadCorpseIds) {
-        const renderer = this.corpseRenderers.get(deadId);
-        if (renderer) {
-          this.scene.remove(renderer.mesh);
-          renderer.dispose();
-          this.corpseRenderers.delete(deadId);
-        }
+        this.corpseRenderer.removeCorpse(deadId);
       }
     }
+
+    // Mark corpse instance matrices as updated
+    this.corpseRenderer.finishUpdate();
 
     // Update UI with stats
     this.ui.updateStats({
-      creatures: Array.from(this.creatureRenderers.values()).map(r => r.data),
-      plants: Array.from(this.plantRenderers.values()).map(r => r.data),
-      corpses: Array.from(this.corpseRenderers.values()).map(r => r.data),
+      creatures: this.creatureManager.getAllCreatureData(),
+      plants: data.plants,
+      corpses: data.corpses || [],
       time: data.stats.time,
-      energySources: data.stats.energySources // Pass diet stats
+      energySources: data.stats.energySources
     });
   }
 
@@ -1761,19 +2461,39 @@ export class World {
 
       this.raycaster.setFromCamera(this.mouse, this.camera);
 
-      const creatureMeshes = Array.from(this.creatureRenderers.values()).map(r => r.mesh);
-      const intersects = this.raycaster.intersectObjects(creatureMeshes, true);
+      // Get detailed creature meshes from LOD manager and LOD mesh
+      const detailedMeshes = Array.from(this.creatureManager.activeRenderers.values()).map(r => r.mesh);
+      const allMeshes = [...detailedMeshes, this.creatureManager.lodMesh];
+      const intersects = this.raycaster.intersectObjects(allMeshes, true);
 
       if (intersects.length > 0) {
-        const clickedMesh = intersects[0].object;
-        const renderer = Array.from(this.creatureRenderers.values()).find(r =>
-          r.mesh === clickedMesh || r.mesh.children.includes(clickedMesh) ||
-          r.mesh.traverse && clickedMesh.parent === r.mesh
-        );
+        const clickedObject = intersects[0].object;
 
-        if (renderer) {
-          this.selectedCreature = renderer.data;
-          this.ui.showCreature(renderer.data);
+        // Check if clicked on LOD instanced mesh
+        if (clickedObject === this.creatureManager.lodMesh) {
+          const instanceId = intersects[0].instanceId;
+          // Find creature id by instance index
+          for (const [id, index] of this.creatureManager.lodCreatureIndices) {
+            if (index === instanceId) {
+              const data = this.creatureManager.getCreatureData(id);
+              if (data) {
+                this.selectedCreature = data;
+                this.ui.showCreature(data);
+              }
+              break;
+            }
+          }
+        } else {
+          // Clicked on detailed mesh
+          const renderer = Array.from(this.creatureManager.activeRenderers.values()).find(r =>
+            r.mesh === clickedObject || r.mesh.children.includes(clickedObject) ||
+            clickedObject.parent === r.mesh
+          );
+
+          if (renderer) {
+            this.selectedCreature = renderer.data;
+            this.ui.showCreature(renderer.data);
+          }
         }
       } else {
         this.selectedCreature = null;
@@ -1949,6 +2669,9 @@ export class World {
     this.controls.target.z = Math.max(-halfDepth, Math.min(halfDepth, this.controls.target.z));
 
     this.controls.update();
+
+    // Update plant visibility based on camera position
+    this.plantRenderer.updateCulling();
 
     // Send update to worker if ready and not waiting for response
     if (this.workerReady && !this.pendingUpdate) {

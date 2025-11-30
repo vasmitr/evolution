@@ -305,6 +305,6 @@ export const SIMULATION_CONFIG = {
   mutationAmount: 4, // Up to 4 genes mutate at once
   initialPopulation: 50, // More starting creatures for diversity
   foodSpawnRate: 50.0, // High plant spawn rate to keep up with creatures
-  maxCreatures: 2000, // Higher limit for faster evolution
-  maxPlants: 5000, // More plants to support larger population
+  maxCreatures: 5000, // Higher limit - creatures still use individual meshes
+  maxPlants: 8000, // Plants use InstancedMesh - can handle many more efficiently
 };
