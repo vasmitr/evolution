@@ -159,12 +159,12 @@ export const DEFAULT_GENE_WEIGHTS = {
       lengthFromVariativeness: 1.0, // How much variativeness extends limbs
       widthBase: 0.3, // Base limb width
       widthFromVariativeness: -0.2, // High variativeness = thinner limbs
-      
+
       // Limb count affected by limbs gene value
       countMin: 0,
       countMax: 6,
     },
-    
+
     // Body streamlining (affected by maneuverability + speed)
     body: {
       // High variativeness in maneuverability = more streamlined (good for swimming)
@@ -172,11 +172,11 @@ export const DEFAULT_GENE_WEIGHTS = {
       streamliningBase: 1.0, // Length/width ratio
       streamliningFromManeuver: 0.8, // Maneuverability variativeness effect
       streamliningFromSpeed: 0.5, // Speed variativeness effect
-      
+
       // Body flexibility
       flexibilityFromManeuver: 1.0, // Affects turning radius
     },
-    
+
     // Fins/appendages (affected by maneuverability in water)
     fins: {
       // High variativeness = larger fins (better swimming, more drag on land)
@@ -184,34 +184,34 @@ export const DEFAULT_GENE_WEIGHTS = {
       sizeBase: 0.2,
       sizeFromVariativeness: 0.8,
       countFromManeuver: 4, // Max number of fins
-      
+
       // Fin shape
       aspectRatioBase: 1.5, // Length/width of fins
       aspectRatioFromVariativeness: 1.0, // High = longer, narrower fins
     },
-    
+
     // Wings (affected by limbs + maneuverability for flying)
     wings: {
       // High variativeness in both = larger wing surface
       spanBase: 0.5,
       spanFromLimbVariativeness: 1.5,
       spanFromManeuverVariativeness: 1.0,
-      
+
       // Wing loading (body mass / wing area)
       // Lower is better for flight
       minWingLoading: 0.5,
     },
-    
+
     // Jaw/mouth characteristics
     jaws: {
       // High variativeness = larger, more powerful jaws
       sizeBase: 0.3,
       sizeFromVariativeness: 0.7,
-      
+
       // Bite force multiplier
       forceFromVariativeness: 1.5,
     },
-    
+
     // Armor plating
     armor: {
       // High variativeness = thicker, heavier armor
@@ -220,11 +220,11 @@ export const DEFAULT_GENE_WEIGHTS = {
       thicknessFromVariativeness: 0.8,
       coverageBase: 0.5, // % of body covered
       coverageFromValue: 0.5, // Gene value affects coverage
-      
+
       // Mass penalty
       massPenaltyFromVariativeness: 0.3,
     },
-    
+
     // Sensory organs (eyes, ears, antennae)
     sensors: {
       // High variativeness = larger, more prominent sensors
@@ -305,6 +305,6 @@ export const SIMULATION_CONFIG = {
   mutationAmount: 4, // Up to 4 genes mutate at once
   initialPopulation: 50, // More starting creatures for diversity
   foodSpawnRate: 50.0, // High plant spawn rate to keep up with creatures
-  maxCreatures: 5000, // Higher limit - creatures still use individual meshes
-  maxPlants: 8000, // Plants use InstancedMesh - can handle many more efficiently
+  maxCreatures: 10000, // Higher limit - creatures still use individual meshes
+  maxPlants: 20000, // Plants use InstancedMesh - can handle many more efficiently
 };

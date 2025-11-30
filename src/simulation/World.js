@@ -2280,6 +2280,7 @@ export class World {
     this.noise2D = createNoise2D();
 
     this.ui = new UI();
+    this.ui.setFocusCallback((creature) => this.focusOnCreature(creature));
     this.selectedCreature = null;
     this.raycaster = new THREE.Raycaster();
     this.mouse = new THREE.Vector2();
@@ -2511,6 +2512,17 @@ export class World {
         this.controls.update();
       });
     }
+  }
+
+  // Focus camera on a specific creature
+  focusOnCreature(creature) {
+    if (!creature || !creature.position) return;
+
+    const pos = creature.position;
+    // Position camera above and behind the creature
+    this.camera.position.set(pos.x, pos.y + 30, pos.z + 50);
+    this.controls.target.set(pos.x, pos.y, pos.z);
+    this.controls.update();
   }
 
   initTerrain() {
