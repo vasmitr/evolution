@@ -1687,7 +1687,7 @@ class LODCreatureManager {
         shouldBeDetailed.add(data.id);
         detailedCount++;
         this.stats.detailed++;
-      } else if (distance < LOD_CONFIG.lodDistance) {
+      } else if (distance < LOD_CONFIG.cullDistance) {
         shouldBeLod.add(data.id);
         this.stats.lod++;
       } else {
@@ -1881,8 +1881,8 @@ class InstancedPlantRenderer {
     this.landIndices = []; // Available indices for land plants
     this.time = 0;
 
-    // Culling settings - use lodDistance (250) where creatures become LOD spheres
-    this.cullDistance = LOD_CONFIG.lodDistance;
+    // Culling settings - use detailDistance to match creature visibility
+    this.cullDistance = LOD_CONFIG.detailDistance;
     this.camera = null; // Set by World
 
     // Shared geometry for all plants
@@ -1927,9 +1927,11 @@ class InstancedPlantRenderer {
     this.waterMesh.instanceMatrix.needsUpdate = true;
     this.landMesh.instanceMatrix.needsUpdate = true;
 
-    // Enable frustum culling on the mesh level
-    this.waterMesh.frustumCulled = true;
-    this.landMesh.frustumCulled = true;
+    // Disable Three.js frustum culling - we do our own distance-based culling per instance
+    // Three.js frustum culling uses a single bounding sphere for the entire InstancedMesh,
+    // which doesn't work well when instances are spread across the world
+    this.waterMesh.frustumCulled = false;
+    this.landMesh.frustumCulled = false;
 
     scene.add(this.waterMesh);
     scene.add(this.landMesh);
@@ -1940,6 +1942,10 @@ class InstancedPlantRenderer {
     this._quaternion = new THREE.Quaternion();
     this._scale = new THREE.Vector3();
     this._cameraPos = new THREE.Vector3();
+
+    // Frustum for view culling
+    this._frustum = new THREE.Frustum();
+    this._projScreenMatrix = new THREE.Matrix4();
   }
 
   setCamera(camera) {
@@ -2067,6 +2073,49 @@ class InstancedPlantRenderer {
 
   finishUpdate() {
     // Mark matrices as needing update
+    this.waterMesh.instanceMatrix.needsUpdate = true;
+    this.landMesh.instanceMatrix.needsUpdate = true;
+  }
+
+  // Update visibility of all plants based on camera frustum and distance (call each frame)
+  updateCulling() {
+    if (!this.camera) return;
+
+    // Update frustum from camera
+    this._projScreenMatrix.multiplyMatrices(
+      this.camera.projectionMatrix,
+      this.camera.matrixWorldInverse
+    );
+    this._frustum.setFromProjectionMatrix(this._projScreenMatrix);
+    this.camera.getWorldPosition(this._cameraPos);
+
+    const cullDistSq = this.cullDistance * this.cullDistance;
+
+    for (const [, plantInfo] of this.plantData) {
+      // Check distance
+      const dx = plantInfo.position.x - this._cameraPos.x;
+      const dy = plantInfo.position.y - this._cameraPos.y;
+      const dz = plantInfo.position.z - this._cameraPos.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+
+      // Check if in frustum (view)
+      this._position.set(plantInfo.position.x, plantInfo.position.y, plantInfo.position.z);
+      const inFrustum = this._frustum.containsPoint(this._position);
+
+      const shouldBeVisible = distSq < cullDistSq && inFrustum;
+      const mesh = plantInfo.isWater ? this.waterMesh : this.landMesh;
+
+      if (shouldBeVisible) {
+        this._quaternion.setFromEuler(plantInfo.rotation);
+        const scale = 0.5 + (plantInfo.energy || 50) / 80 * 0.5;
+        this._scale.set(scale, scale, scale);
+        this._matrix.compose(this._position, this._quaternion, this._scale);
+      } else {
+        this._matrix.makeScale(0, 0, 0);
+      }
+      mesh.setMatrixAt(plantInfo.index, this._matrix);
+    }
+
     this.waterMesh.instanceMatrix.needsUpdate = true;
     this.landMesh.instanceMatrix.needsUpdate = true;
   }
@@ -2620,6 +2669,9 @@ export class World {
     this.controls.target.z = Math.max(-halfDepth, Math.min(halfDepth, this.controls.target.z));
 
     this.controls.update();
+
+    // Update plant visibility based on camera position
+    this.plantRenderer.updateCulling();
 
     // Send update to worker if ready and not waiting for response
     if (this.workerReady && !this.pendingUpdate) {
