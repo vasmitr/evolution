@@ -243,8 +243,11 @@ export class UI {
 
     // === All updates below run every statsUpdateInterval frames ===
 
-    // Basic stats
-    const time = world.time || 0;
+    // Use pre-calculated stats from worker (no main thread iteration!)
+    const stats = world.stats || {};
+    const time = stats.time || 0;
+
+    // Season calculation (simple, keep on main thread)
     const season = world.season || 0;
     const seasonValue = (season + 1) / 2;
     let seasonName = 'Spring';
@@ -255,62 +258,31 @@ export class UI {
 
     document.getElementById('stat-time').textContent = `Time: ${Math.floor(time)}s`;
     document.getElementById('stat-season').textContent = `Season: ${seasonName}`;
-    document.getElementById('stat-creatures').textContent = `Creatures: ${world.creatures.length}`;
-    document.getElementById('stat-plants').textContent = `Plants: ${world.plants.length}`;
-    document.getElementById('stat-corpses').textContent = `Corpses: ${world.corpses ? world.corpses.length : 0}`;
+    document.getElementById('stat-creatures').textContent = `Creatures: ${stats.creatureCount || 0}`;
+    document.getElementById('stat-plants').textContent = `Plants: ${stats.plantCount || 0}`;
+    document.getElementById('stat-corpses').textContent = `Corpses: ${stats.corpseCount || 0}`;
+    document.getElementById('stat-generation').textContent = `Max Generation: ${stats.maxGeneration || 0}`;
+    document.getElementById('stat-mature').textContent = `Mature: ${stats.matureCount || 0}`;
+    document.getElementById('stat-avg-age').textContent = `Avg Age: ${(stats.avgAge || 0).toFixed(1)}s`;
 
-    // Single pass through creatures for all stats
-    let maxGen = 0;
-    let matureCount = 0;
-    let totalAge = 0;
-    let predators = 0;
-    let parasites = 0;
-    let scavengers = 0;
-    let herbivores = 0;
-    const avgGenes = {};
-    const geneKeys = Object.keys(GENE_DEFINITIONS);
-
-    for (const key of geneKeys) {
-      avgGenes[key] = 0;
-    }
-
-    for (const c of world.creatures) {
-      // Basic stats
-      if (c.generation > maxGen) maxGen = c.generation;
-      if (c.mature) matureCount++;
-      totalAge += c.age || 0;
-
-      // Gene averages
-      for (const key of geneKeys) {
-        avgGenes[key] += this.getGeneValue(c, key);
-      }
-
-      // Population breakdown
-      const isPredator = this.getGeneValue(c, 'predatory') > 0.4;
-      const isParasite = this.getGeneValue(c, 'parasitic') > 0.4;
-      const isScavenger = this.getGeneValue(c, 'scavenging') > 0.4;
-
-      if (isPredator) predators++;
-      else if (isParasite) parasites++;
-      else if (isScavenger) scavengers++;
-      else herbivores++;
-    }
-
-    document.getElementById('stat-generation').textContent = `Max Generation: ${maxGen}`;
-    document.getElementById('stat-mature').textContent = `Mature: ${matureCount}`;
-    const avgAge = world.creatures.length > 0 ? totalAge / world.creatures.length : 0;
-    document.getElementById('stat-avg-age').textContent = `Avg Age: ${avgAge.toFixed(1)}s`;
-
-    // Average genes display
-    if (world.creatures.length > 0) {
+    // Average genes display (pre-calculated by worker)
+    const avgGenes = stats.avgGenes;
+    if (avgGenes) {
       let html = '';
-      for (const key of geneKeys) {
-        const val = (avgGenes[key] / world.creatures.length).toFixed(2);
+      for (const key of Object.keys(GENE_DEFINITIONS)) {
+        const val = (avgGenes[key] || 0).toFixed(2);
         const bar = '█'.repeat(Math.floor(val * 10));
         html += `<div style="margin: 2px 0;">${GENE_DEFINITIONS[key].name}: ${bar} ${val}</div>`;
       }
       document.getElementById('avg-genes').innerHTML = html;
     }
+
+    // Population breakdown (pre-calculated by worker)
+    const pop = stats.population || {};
+    const predators = pop.predators || 0;
+    const parasites = pop.parasites || 0;
+    const scavengers = pop.scavengers || 0;
+    const herbivores = pop.herbivores || 0;
 
     // Diet stats display
     if (this.dietHistory.plants.length > 0) {
@@ -338,8 +310,8 @@ export class UI {
       document.getElementById('diet-stats').innerHTML = dietHtml;
     }
 
-    // Population breakdown display
-    if (world.creatures.length > 0) {
+    // Population breakdown display (pre-calculated by worker)
+    if (stats.creatureCount > 0) {
       document.getElementById('population-breakdown').innerHTML =
         `<span style="color:#f88;">${predators}</span>` +
         `<span style="color:#a6f;">${parasites}</span>` +

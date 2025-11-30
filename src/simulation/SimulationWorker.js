@@ -1171,6 +1171,22 @@ function update(dt) {
     filter: 0
   };
 
+  // Track creature stats (calculated during creature loop - no extra iteration needed)
+  let maxGeneration = 0;
+  let matureCount = 0;
+  let totalAge = 0;
+  let predatorCount = 0;
+  let parasiteCount = 0;
+  let scavengerCount = 0;
+  let herbivoreCount = 0;
+  const geneAverages = {
+    size: 0, speed: 0, sight: 0, smell: 0, hearing: 0,
+    armor: 0, metabolicEfficiency: 0, toxicity: 0, coldResistance: 0,
+    heatResistance: 0, lungCapacity: 0, scavenging: 0, parasitic: 0,
+    reproductionUrgency: 0, maneuverability: 0, predatory: 0,
+    limbs: 0, jaws: 0, filterFeeding: 0, colorHue: 0, colorSaturation: 0
+  };
+
   // Build creature spatial grid for hunting
   creatureSpatialGrid.clear();
   for (const c of creatures) {
@@ -1190,6 +1206,40 @@ function update(dt) {
   // Update creatures
   for (let i = creatures.length - 1; i >= 0; i--) {
     const c = creatures[i];
+
+    // Collect stats while iterating (no separate loop needed)
+    if (c.generation > maxGeneration) maxGeneration = c.generation;
+    if (c.mature) matureCount++;
+    totalAge += c.age;
+
+    // Population breakdown
+    if (c.predatory > 0.4) predatorCount++;
+    else if (c.parasitic > 0.4) parasiteCount++;
+    else if (c.scavenging > 0.4) scavengerCount++;
+    else herbivoreCount++;
+
+    // Gene averages (using cached values on creature)
+    geneAverages.size += c.size;
+    geneAverages.speed += c.speed;
+    geneAverages.sight += c.sight;
+    geneAverages.smell += c.smell;
+    geneAverages.hearing += c.hearing;
+    geneAverages.armor += c.armor;
+    geneAverages.metabolicEfficiency += c.metabolicEfficiency;
+    geneAverages.toxicity += c.toxicity;
+    geneAverages.coldResistance += c.coldResistance;
+    geneAverages.heatResistance += c.heatResistance;
+    geneAverages.lungCapacity += c.lungCapacity;
+    geneAverages.scavenging += c.scavenging;
+    geneAverages.parasitic += c.parasitic;
+    geneAverages.reproductionUrgency += c.reproductionUrgency;
+    geneAverages.maneuverability += c.maneuverability;
+    geneAverages.predatory += c.predatory;
+    geneAverages.limbs += c.limbs;
+    geneAverages.jaws += c.jaws;
+    geneAverages.filterFeeding += c.filterFeeding;
+    geneAverages.colorHue += c.colorHue;
+    geneAverages.colorSaturation += c.colorSaturation;
 
     const terrainHeight = getTerrainHeight(c.position.x, c.position.z);
     const currentBiome = getBiomeAt(c.position.x, c.position.z);
@@ -2120,7 +2170,40 @@ function update(dt) {
       plantCount: plants.length,
       corpseCount: corpses.length,
       time,
-      energySources: energyStats
+      energySources: energyStats,
+      // Pre-calculated stats (no main thread iteration needed)
+      maxGeneration,
+      matureCount,
+      avgAge: creatures.length > 0 ? totalAge / creatures.length : 0,
+      population: {
+        predators: predatorCount,
+        parasites: parasiteCount,
+        scavengers: scavengerCount,
+        herbivores: herbivoreCount
+      },
+      avgGenes: creatures.length > 0 ? {
+        size: geneAverages.size / creatures.length,
+        speed: geneAverages.speed / creatures.length,
+        sight: geneAverages.sight / creatures.length,
+        smell: geneAverages.smell / creatures.length,
+        hearing: geneAverages.hearing / creatures.length,
+        armor: geneAverages.armor / creatures.length,
+        metabolicEfficiency: geneAverages.metabolicEfficiency / creatures.length,
+        toxicity: geneAverages.toxicity / creatures.length,
+        coldResistance: geneAverages.coldResistance / creatures.length,
+        heatResistance: geneAverages.heatResistance / creatures.length,
+        lungCapacity: geneAverages.lungCapacity / creatures.length,
+        scavenging: geneAverages.scavenging / creatures.length,
+        parasitic: geneAverages.parasitic / creatures.length,
+        reproductionUrgency: geneAverages.reproductionUrgency / creatures.length,
+        maneuverability: geneAverages.maneuverability / creatures.length,
+        predatory: geneAverages.predatory / creatures.length,
+        limbs: geneAverages.limbs / creatures.length,
+        jaws: geneAverages.jaws / creatures.length,
+        filterFeeding: geneAverages.filterFeeding / creatures.length,
+        colorHue: geneAverages.colorHue / creatures.length,
+        colorSaturation: geneAverages.colorSaturation / creatures.length
+      } : null
     }
   };
 }

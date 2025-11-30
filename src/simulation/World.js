@@ -2419,12 +2419,12 @@ export class World {
     // Mark corpse instance matrices as updated
     this.corpseRenderer.finishUpdate();
 
-    // Update UI with stats
+    // Update UI with stats (pre-calculated by worker, no main thread iteration)
     this.ui.updateStats({
-      creatures: this.creatureManager.getAllCreatureData(),
+      creatures: this.creatureManager.getAllCreatureData(), // For glossary only
       plants: data.plants,
       corpses: data.corpses || [],
-      time: data.stats.time,
+      stats: data.stats, // All stats pre-calculated by worker
       energySources: data.stats.energySources
     });
   }
