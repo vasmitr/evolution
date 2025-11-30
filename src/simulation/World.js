@@ -35,9 +35,10 @@ const SharedGeometries = {
 // LOD Configuration
 const LOD_CONFIG = {
   detailDistance: 80,    // Full detail within this distance
-  lodDistance: 250,      // LOD spheres between detail and this distance
-  cullDistance: 500,     // Don't render beyond this
+  lodDistance: 200,      // LOD spheres between detail and this distance
+  cullDistance: 250,     // Don't render beyond this (fog hides pop-in)
   maxDetailedCreatures: 100, // Max creatures with full detail at once
+  maxLodCreatures: 2000, // Max LOD spheres to render at once
   poolSize: 150,         // Size of creature renderer pool
 };
 
@@ -1699,12 +1700,12 @@ class LODCreatureManager {
         continue;
       }
 
-      // Decide LOD level
+      // Decide LOD level (with limits)
       if (distance < LOD_CONFIG.detailDistance && detailedCount < LOD_CONFIG.maxDetailedCreatures) {
         shouldBeDetailed.add(data.id);
         detailedCount++;
         this.stats.detailed++;
-      } else if (distance < LOD_CONFIG.cullDistance) {
+      } else if (distance < LOD_CONFIG.cullDistance && shouldBeLod.size < LOD_CONFIG.maxLodCreatures) {
         shouldBeLod.add(data.id);
         this.stats.lod++;
       } else {
