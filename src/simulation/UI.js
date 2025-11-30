@@ -26,6 +26,7 @@ export class UI {
     this.glossaryOpen = false;
     this.speciesData = new Map(); // Track species by signature
     this.speciesHistory = new Map(); // Track historical population for status
+    this.svgCache = new Map(); // Cache SVG strings by species signature
   }
 
   createStatsPanel() {
@@ -208,10 +209,10 @@ export class UI {
   }
 
   updateStats(world) {
-    // Store world data for glossary
-    this.setWorldData(world);
+    // Always keep a reference to world data for glossary (just a pointer, very cheap)
+    this.lastWorldData = world;
 
-    // Update glossary if open (every ~2 seconds)
+    // Only do heavy glossary calculations when it's open
     if (this.glossaryOpen) {
       this.glossaryUpdateCounter = (this.glossaryUpdateCounter || 0) + 1;
       if (this.glossaryUpdateCounter >= 120) { // ~2 seconds at 60fps
@@ -430,6 +431,7 @@ export class UI {
     panel.style.display = this.glossaryOpen ? 'block' : 'none';
 
     if (this.glossaryOpen) {
+      this.glossaryUpdateCounter = 0;
       this.updateGlossary();
     }
   }
@@ -518,8 +520,14 @@ export class UI {
     return `hsl(${Math.floor(hue * 360)}, ${Math.floor(sat * 100)}%, ${Math.floor(light * 100)}%)`;
   }
 
-  // Generate a simple SVG creature icon based on traits
+  // Generate a simple SVG creature icon based on traits (cached by signature)
   getCreatureSVG(creature) {
+    // Use species signature as cache key
+    const sig = this.getSpeciesSignature(creature);
+    if (this.svgCache.has(sig)) {
+      return this.svgCache.get(sig);
+    }
+
     const size = 0.5 + this.getGeneValue(creature, 'size') * 0.5;
     const color = this.getCreatureColor(creature);
     const hasJaws = this.getGeneValue(creature, 'jaws') > 0.3;
@@ -596,6 +604,10 @@ export class UI {
     }
 
     svg += '</svg>';
+
+    // Cache the SVG for this species signature
+    this.svgCache.set(sig, svg);
+
     return svg;
   }
 
@@ -771,11 +783,6 @@ export class UI {
         this.focusOnSpecies(sig);
       });
     });
-  }
-
-  // Store world data reference for glossary updates
-  setWorldData(world) {
-    this.lastWorldData = world;
   }
 
   // Set callback for focusing camera on a creature
