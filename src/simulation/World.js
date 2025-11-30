@@ -1522,8 +1522,11 @@ class LODCreatureManager {
     this.camera = camera;
     this.maxCreatures = maxCreatures;
 
-    // All creature data from simulation
-    this.creatureData = new Map(); // id -> data
+    // All creature data from simulation (full data cached, merged with updates)
+    this.creatureData = new Map(); // id -> full data (cached)
+
+    // Track which creatures we've received full data for
+    this.knownCreatures = new Set();
 
     // LOD tracking
     this.detailedCreatures = new Map(); // id -> CreatureRenderer (nearby, full detail)
@@ -1599,6 +1602,12 @@ class LODCreatureManager {
     this.poolSize = LOD_CONFIG.poolSize;
   }
 
+  // Add full creature data (called for new creatures with DNA, genes, etc.)
+  addCreatureData(fullData) {
+    this.creatureData.set(fullData.id, fullData);
+    this.knownCreatures.add(fullData.id);
+  }
+
   // Get a renderer from pool or create new one
   acquireRenderer(data) {
     let renderer;
@@ -1663,12 +1672,22 @@ class LODCreatureManager {
     const shouldBeLod = new Set();
     let detailedCount = 0;
 
-    for (const { data, distance } of creaturesWithDistance) {
-      // Store/update creature data
-      this.creatureData.set(data.id, data);
+    for (const { data: updateData, distance } of creaturesWithDistance) {
+      // Merge update data with cached full data (if exists)
+      let data;
+      if (this.knownCreatures.has(updateData.id)) {
+        // Merge minimal update data into cached full data
+        const cached = this.creatureData.get(updateData.id);
+        Object.assign(cached, updateData);
+        data = cached;
+      } else {
+        // Unknown creature - use update data directly (shouldn't happen normally)
+        data = updateData;
+        this.creatureData.set(data.id, data);
+      }
 
       // Check frustum culling (approximate with sphere)
-      const scale = 0.8 + data.size * 1.2;
+      const scale = 0.8 + (data.size || 0.5) * 1.2;
       this._position.set(data.position.x, data.position.y, data.position.z);
 
       // Simple frustum check
@@ -1823,6 +1842,7 @@ class LODCreatureManager {
   removeCreature(id) {
     // Remove from data
     this.creatureData.delete(id);
+    this.knownCreatures.delete(id);
 
     // Remove LOD instance
     this.removeLodInstance(id);
@@ -2341,8 +2361,10 @@ export class World {
   }
 
   handleWorkerInit(data) {
-    // Initial creatures will be handled by the first update call
-    // The LODCreatureManager handles all creature lifecycle
+    // Add initial creatures with FULL data (includes DNA, genes, emergentFeatures)
+    for (const creature of data.creatures) {
+      this.creatureManager.addCreatureData(creature);
+    }
 
     // Add initial plants to instanced renderer
     for (const plantData of data.plants) {
@@ -2356,7 +2378,15 @@ export class World {
   handleWorkerUpdate(data) {
     this.lastWorkerData = data;
 
-    // Update all creatures using LOD manager (handles LOD, frustum culling, object pooling)
+    // First, add new creatures with FULL data (includes DNA, genes, emergentFeatures)
+    if (data.newCreatures) {
+      for (const newCreature of data.newCreatures) {
+        this.creatureManager.addCreatureData(newCreature);
+      }
+    }
+
+    // Update existing creatures with minimal data (position, velocity, energy, etc.)
+    // LOD manager merges this with cached full data
     this.creatureManager.update(data.creatures, data.deadCreatureIds, 0.016);
 
     // Update plants using instanced renderer (2 draw calls for all plants!)

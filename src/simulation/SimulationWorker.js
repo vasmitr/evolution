@@ -805,7 +805,7 @@ class WorkerCreature {
     this.energy += amount;
   }
 
-  // Serialize for transfer to main thread
+  // Serialize for transfer to main thread - FULL data (for new creatures only)
   toData() {
     return {
       id: this.id,
@@ -843,6 +843,20 @@ class WorkerCreature {
       // Emergent features from gene interactions
       emergentFeatures: this.dna.getEmergentFeatures(),
       dna: this.dna.toData()
+    };
+  }
+
+  // Serialize minimal data for per-frame updates (existing creatures)
+  toUpdateData() {
+    return {
+      id: this.id,
+      position: this.position,
+      velocity: this.velocity,
+      energy: this.energy,
+      age: this.age,
+      dead: this.dead,
+      mature: this.mature,
+      developmentProgress: this.developmentProgress
     };
   }
 }
@@ -2090,7 +2104,8 @@ function update(dt) {
   }
 
   return {
-    creatures: creatures.map(c => c.toData()),
+    // Send minimal update data for existing creatures (~100 bytes each vs ~3KB)
+    creatures: creatures.map(c => c.toUpdateData()),
     plants: plants.map(p => p.toData()),
     corpses: corpses.map(c => c.toData()),
     newPlants,
@@ -2098,6 +2113,7 @@ function update(dt) {
     deadCreatureIds,
     deadPlantIds: [...deadPlantIds, ...eatenPlantIds],
     deadCorpseIds,
+    // Send FULL data only for new creatures (includes DNA, genes, emergentFeatures)
     newCreatures: newCreatures.map(c => c.toData()),
     stats: {
       creatureCount: creatures.length,
